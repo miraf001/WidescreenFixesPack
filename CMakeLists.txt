@@ -137,8 +137,8 @@ target_compile_definitions(${FIX_PROJECT_NAME} PRIVATE
     rsc_FileVersion_MINOR=1
     rsc_FileVersion_BUILD=0
     rsc_FileVersion_REVISION=0
-    "rsc_FileVersion=\"0.1.0-dev\""
-    "rsc_ProductVersion=\"0.1.0-dev-${FIX_GIT_SHA}\""
+    "rsc_FileVersion=\"0.1.0\""
+    "rsc_ProductVersion=\"0.1.0-${FIX_GIT_SHA}\""
     "rsc_GitSHA1=\"${FIX_GIT_SHA}\""
     "rsc_GitSHA1W=L\"${FIX_GIT_SHA}\""
 )
