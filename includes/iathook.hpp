@@ -39,7 +39,7 @@ public:
                         {
                             auto name = std::string_view(std::get<0>(inputs));
                             auto num = std::string("-1");
-                            if (name.contains("@"))
+                            if (name.find("@") != std::string_view::npos)
                             {
                                 num = name.substr(name.find_last_of("@") + 1);
                                 name = name.substr(0, name.find_last_of("@"));
@@ -113,7 +113,7 @@ public:
                             {
                                 auto name = std::string_view(std::get<0>(inputs));
                                 auto num = std::string("-1");
-                                if (name.contains("@"))
+                                if (name.find("@") != std::string_view::npos)
                                 {
                                     num = name.substr(name.find_last_of("@") + 1);
                                     name = name.substr(0, name.find_last_of("@"));
@@ -197,7 +197,7 @@ public:
                     {
                         auto name = std::string_view(std::get<0>(inputs));
                         auto num = std::string("-1");
-                        if (name.contains("@"))
+                        if (name.find("@") != std::string_view::npos)
                         {
                             num = name.substr(name.find_last_of("@") + 1);
                             name = name.substr(0, name.find_last_of("@"));

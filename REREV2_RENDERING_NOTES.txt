@@ -1,0 +1,1369 @@
+RESIDENT EVIL REVELATIONS 2 - POZNAMKY K RENDEROVANI GUI
+=======================================================
+
+Overeno ve hre: 2026-08-29
+
+SPRAVNY ZPUSOB "DUPLIKACE" JEDNODUSSICH GUI PRVKU
+--------------------------------------------------
+
+Pokud hra udrzuje jen jeden nativni GUI objekt a jednu hotovou geometrii prvku,
+nevytvaret druhou instanci celeho GUI controlleru. Misto toho se ma v jednom
+snimku dvakrat prehrat existujici transformacni/renderovaci cesta tehoz prvku.
+Pred kazdym pruchodem se nastavi jina docasna transformace a po obou pruchodech
+se puvodni stav obnovi.
+
+Overeny postup pro pribehove titulky:
+
+1. Zachovat jediny nativni uGUITextVoice objekt a jeho txt_voice geometrii.
+2. V hooku sub_E18040_rescale rozpoznat tento controller.
+3. V rezimu per-player zavolat sub_E18040(..., SUBTITLES, ...) dvakrat za stejny
+   snimek nad stejnou hotovou geometrii.
+4. Pro prvni pruchod pridat horizontalni offset leve poloviny, pro druhy offset
+   prave poloviny.
+5. Docasny offset drzet jako thread_local, protoze render muze bezet na vice
+   workerech, a po druhem volani vzdy vratit puvodni hodnotu.
+
+Vysledek: renderer zaradi dva draw prikazy se stejnym obsahem, ale s odlisnymi
+transformacemi. Obe kopie jsou zobrazeny soucasne a neblikaji.
+
+Proc je tento postup lepsi nez klonovani controlleru:
+
+- neni nutne synchronizovat text, resource loading, animace ani lifecycle;
+- nevznika druhy krehky nativni objekt v internim GUI seznamu;
+- odpadaji pady, zamrzani a stav, kdy se geometrie vytvori pouze pro levou kopii;
+- prvek zustava na sdilenem platne a neni orezan pevnym prirazenim viewportu.
+
+POZICE A INI
+------------
+
+[SUBTITLES] PerPlayer = 1 pouziva dvojity render. PerPlayer = 0 vykresli jednu
+spolecnou kopii uprostred cele plochy. LeftOffsetX a RightOffsetX upravuji
+horizontalni pozici obou kopii, zatimco OffsetY, ScaleX a ScaleY jsou spolecne.
+Hodnoty lze za behu nacist klavesou F5.
+
+Vychozi LeftOffsetX = -0.25 a RightOffsetX = +0.25 znamenaji 25 % a 75 % sirky
+celeho spojeneho platna. Jsou tedy stredy dvou stejne sirokych polovin nezavisle
+na pomeru stran a funguji i pro ultrawide nebo Eyefinity. Pri nestejnych
+monitorech, bezel compensation nebo asymetrickem rozlozeni je lze doladit v INI.
+
+OMEZENI A PRAVIDLA PRO DALSI PRVKY
+---------------------------------
+
+Tento postup je vhodny hlavne pro jednodussi prvky, jejichz hotovou geometrii
+lze bezpecne odeslat rendereru opakovane. Pred pouzitim na jiny prvek je nutne
+overit, zda jeho render volani nespotrebovava jednorazova data, neposouva animaci
+nebo trvale nemeni globalni viewport, scissor ci jiny stav. Kazdy docasne zmeneny
+stav se musi po kazdem pruchodu spolehlive obnovit.
+
+Pro titulky bylo primo ve hre overeno, ze dvojite volani v jednom snimku je
+stabilni, plynule a zobrazuje citelnou kopii v leve i prave polovine.
+
+HUD: ODMITNUTY POKUS A SKUTECNE VETVENI SP/MP (2026-08-30)
+---------------------------------------------------------
+
+Uzivatel zamitl experiment UseSinglePlayerLayout: menu a titulky zustaly
+spravne, ale zamerovac byl velky a vpravo, vybaveni/bylinky mimo obraz.
+Hook 0xE17050 menil pouze vstupni obdelnik obecneho GUI prepocitavace.
+To NEBYL prepinac skutecneho SP rozlozeni. Zmena anchor/scale tabulek a
+vystupni matice neodstranila MP souradnice nastavovane konkretni tridou GUI.
+Experiment je archivovan v recovery/checkpoints/
+2026-08-30-rejected-sp-canvas-experiment/; aktivni zdroj byl obnoven na
+obsah overeneho checkpointu 2026-08-29-working-dual-subtitles-fullscreen-gui
+(nasledne doplnen pouze samostatny, vychozne vypnuty test stop po strelach).
+INI ponechava UseSinglePlayerLayout=0 pro vypnuti jeste beziciho stareho
+experimentu pres F5; obnoveny zdroj tento klic vubec necita.
+
+NOVE: staticky overeno v kodu lokalniho EXE, nikoliv jeste nova oprava ve hre:
+
+- Funkce 0x9553D0 vraci true, pokud objekt *(0x157AE00) ma +0x8F0 == 1
+  a +0x8F4 == 1. Accessor 0x886DF0 cte prave +0x8F4. V aktualnim MP byly
+  obe hodnoty 1. Jde o konkretni predikat pouzivany kodem GUI pro split.
+- uGUIReticleBase, funkce 0x94FC00, call predikatu na 0x94FC34:
+  MP vetev nastavuje X=800 a scale XYZ=2; druha X=640 a scale XYZ=1.
+  Jde o lokalni hodnoty uzlu, NIKOLIV primo pixely vysledneho obrazu.
+- uGUIHeal, funkce 0x8E9980, call na 0x8E99CC:
+  MP vetev nastavuje lokalni posuny X=-97, Y=-114 nebo -210 a scale XY=1.4;
+  druha posuny 0,0 a scale XY=1. Dalsi podminka je byte controller+0x2B1.
+- uGUIHealNum, funkce 0x8E9E70, call na 0x8E9E9E:
+  MP vetev nastavuje X=1496, Y=590 nebo 482 a scale XYZ=1.4;
+  druha X=1114, Y=579 a scale XYZ=1. Opet jde o lokalni hodnoty uzlu.
+  Oprava identifikace pri zivem testu: tento kod patri HealNum, ne Equip.
+- uGUIEquip, funkce 0x8E4020, call na 0x8E4062:
+  MP prvni uzel X=1496, druhy X=1302, Y=667/559, scale XYZ=1.4;
+  SP prvni X=1114, druhy X=975, Y=634, scale XYZ=1.
+  Identita overena pres update slot vtable+0x24 pro vsechny tri tridy.
+- Settery 0xE690F0/0xE69120 zapisuji node+0xA0/+0xA4 (X/Y).
+  0xE69520/0xE69550 zapisuji node+0xB0/+0xB4 (scale X/Y).
+  Settery pri zmene oznaci dirty bit 0x10000 v node+0x54.
+
+Dulezite: NEVYNUTIT false globalne ve funkci 0x9553D0! Volajici
+0x968F2E v zakladnim updateru 0x968EB0 podle ni meni prirazeni GUI
+k hraci/render masce. Chceme SP lokalni rozmery a pozice, ale zachovat
+spravnou MP kameru, hrace a viewport. Nejprve oddelit layout-only volani
+od routovani a projekce. Nedeklarovat zamerovac opraveny bez testu mireni.
+
+Puvodni snapshot-rerev2-gui-controllers.py mel diagnostickou chybu:
+GUI node v renderRoot interpretoval offsety controlleru. Nevyvozovat z
+takovych starych renderRoot.position/scale zaver; uzly maji jine offsety.
+Skript je nyni opraven: node position +0xA0/+0xA4, scale +0xB0/+0xB4;
+vysledky filtruji zarovnani a zpetny owner pointer korenoveho uzlu.
+Jde o neatomicky snimek pouze nactenych stromu, nikoliv dukaz viditelnosti.
+
+GRAFICKE EFEKTY V CO-OPU (2026-08-30)
+------------------------------------
+
+Novy pozadavek: zjistit a volitelne obnovit efekty vypinane co-opem,
+nejdrive stopy po strelach. Vykon neni hlavni priorita, ale overit
+stabilitu i obe kamery. HUD zustava samostatna priorita; testy nemichat.
+Chybejici decals nahlasil uzivatel; uplny seznam efektu zatim NENI znam.
+Duvod vypinani (vykon/pamet/omezeni vice kamer) zatim neni overen.
+
+Mod samostatne vypina DisableFilmGrain a DisableDamageOverlay podle INI.
+To neni dukaz nativniho snizovani kvality ve split-screen a nema se bez
+rozmyslu obracet spolu s efekty. Tyto uzivatelske volby zachovat.
+
+Stopy v EXE a kodu (jen vyzkum, zadny efektovy patch nebyl nasazen):
+- sAdh::BulletMark, string 0x13D7BA8; sAdh::uBulletMark 0x13D7BBC.
+- Manager *(0x158111C), vtable 0x13D7AAC; ma 64 polozek po 0xC70 bytech,
+  pocinaje +0x30. Aktivni priznak kazde polozky je +4.
+- +0x20 kapacita; +0x24 pocet aktivnich z posledni aktualizace;
+  +0x31C30 render objekt (vtable 0x13D7A68), +0x31C34 resource.
+- 0xA80B60 predava vytvoreni stopy do 0xA7C390, pokud resource existuje.
+  0xA80C60 inicializace, 0xA80BD0 uklid, 0xA7B740 render cesta.
+- 0xA7C1F0 maze aktivni priznaky pri true z 0x8876C0. Ten ale testuje
+  bity 22..24 v objektu *(0x15DE6F8)+0x285B8, nikoliv primo SP/MP stav.
+  Vyznam techto bitu NEZNAMY; nelze je oznacit za vypinac decals.
+
+tools/inspect-rerev2-split-effects.py cte tento stav bez injekce/hooku,
+bez zapisovani a bez pauzy. Validuje accessor a vtable, tiskne JSON;
+--seconds dovoluje kratke sledovani zmen 4x za sekundu. Vzorek neni atomicky.
+Prvni MP vzorek PID 32296: manager/resource/render objekt existuji,
+aktivnich stop 0, clear predikat false. Bez stejneho testu strelby v SP
+a MP to NEDOKAZUJE, kde se stopy ztraceji.
+
+Dalsi test: stejna zbran, stejny povrch a nastaveni; vystrelit v SP,
+zachytit pocet/flags, potom zopakovat v MP pro obe kamery. Rozlisit
+nevytvoreni stopy, okamzite mazani a nevykresleni existujici stopy.
+Teprve pote navrhnout cilene INI prepinace; ostatni efekty auditovat
+stejnym zpusobem, ne povazovat nazvy shaderu za dukaz vypinani v MP.
+
+POZDEJSI NALEZ STEJNEHO DNE: PRIMA BLOKACE VYTVARENI STOP
+--------------------------------------------------------
+
+0xA7C3AD nacita *(0x15DE88C); na 0xA7C3B2 testuje jeho +0xCE0 proti 1.
+Pokud je 1, skok 0xA7C3B9 vede rovnou na navrat 0xA80ADC. Tato hodnota
+je kopie stavu +0x8F4: setup viewportu na 0x4AE89B..0x4AE8A6 vola
+accessor 0x886DF0 a uklada vysledek do renderer+0xCE0.
+V zivem MP procesu bylo renderer+0xCE0 == 1 a skok byl puvodni:
+0F 84 1D 47 00 00. To potvrzuje blokaci tvorby v teto ceste, ale jeste
+neviditelnost/vykresleni po jejim odblokovani ani pricinu rozhodnuti autoru.
+
+Pripraven opt-in [GRAPHICS] RestoreCoopBulletMarks=0 (vychozi stav).
+Hodnota 1 pri startu overi vsech 13 bytu CMP+JE a odstrani pouze sestibyte
+JE. NEMENI globalni SP/MP stav, limit 64 stop, materialove podminky,
+mazani ani kamerove/render masky. Pri jinych bytech se patch neprovede.
+Nutny restart; F5 tento patch neprepina. Dosud nenasazeno do bezici hry
+a neovereno obrazove; sestaveni znamena pouze statickou kontrolu.
+
+Druhy nalezeny test renderer+0xCE0 na 0xA85C73 nastavuje field +0x228
+v efektovem objektu na 6 v MP, jinak 0. Jeho vyznam se zatim neoveril,
+takze ho nemenit a neoznacovat za seznam vypnutych efektu.
+
+Lokalni EXE SHA256 pro tyto adresy:
+55AC7D2BD80704C6A8A1FA7BD2371726ADBAA01AE0FDA056198FB042404367F9
+
+DOPLNENY AUDIT: DALSI EFEKTY, NEJEN STOPY PO STRELACH
+----------------------------------------------------
+
+Po naslednem dotazu uzivatele byl dohledan vyznam drive neznameho +0x228:
+je to mExclusionTrait (nativni reflection 0xC6EDD3..0xC6EE28, string
+0x1410758). Objekt sBioEffect je *(0x15DF97C), vtable 0x13D7E48.
+Kod 0xA85C73..0xA85C82 do teto masky skutecne nastavuje 6 (0x2|0x4)
+pro mScreenType=1 a 0 pro ostatni rezimy. Zive v MP prectena hodnota 6.
+
+Spotrebitel 0xDECE20:
+  mask = local byte [effect+0x116] | sBioEffect.mExclusionTrait;
+  pokud (componentTraits & mask) != 0, vraci false.
+Descriptor komponenty ma velikost 0x44, traits jsou na +4. Tedy nejde
+jen o neznamou numerickou uroven kvality: je to prokazatelny filtr skupin
+komponent s atributy 0x2/0x4. Co tyto skupiny vizualne predstavuji
+(konkretni druh koure/svetel/castic atd.), zatim NENI identifikovano.
+Neoznamovat konkretni seznam efektu bez mapovani resource -> traits.
+Probe nyní vypisuje i tuto masku; zadna nova zmena masky nebyla provedena.
+
+Dalsi prime pouziti mScreenType=1 nalezeno na 0x9C8920:
+  objekt [scene+0x260] ma vtable 0x13C6568;
+  getter typu 0x9C50F0 -> DTI 0x158271C -> jmeno 0x13E26BC
+  je uBioMotionBlurFilter.
+  V MP kod 0x9C892F maze bit 0x4000 v jeho flags+0x0C.
+Toto potvrzuje zvlastni zachazeni s motion blur v co-opu, ale presny
+vyznam bitu 0x4000 a vysledne vypnuti celeho motion blur dosud NEOVERENY.
+Dulezite nezamenit s bitem 0x800: ten ma v uUnit reflection nazev Draw
+(getter 0xC221F0, setter 0x50CC40); jsou to dva odlisne bity.
+
+Primy scan displacements 0xCE0 v kodu 0x400000..0x1240000 odhalil tri
+tyto spotrebitele rezimu mimo inicializaci: bullet marks, exclusion mask,
+motion blur. Nejde o uplny seznam vsech co-op omezeni; jina mista mohou
+pouzivat accessor, jiny stav nebo neprimo odvozene priznaky.
+Vystup scanu: out/rerev2-render-mode-references-20260830.txt (ignorovany).
+
+Stav overeni: Release i Debug build uspesny; 6 offline testu efektoveho
+probe a zive cteni stavu. Novy ASI nebyl nasazen ani nacten bezici hrou.
+Zdrojovy rollback HUD je hotov, herni INI UseSinglePlayerLayout=0 je
+zmeneno, ale k okamzitemu vypnuti stareho beziciho experimentu je jeste
+potreba F5 (pri posledni kontrole log stale ukazoval spLayout=true).
+
+NASAZENI NA PRANI UZIVATELE - 2026-08-30 12:06
+---------------------------------------------
+
+Uzivatel vyslovne chce odstranit dodatecne MP filtrovani pres mExclusionTrait,
+i pred uplnym seznamem jednotlivych efektu. Pridano:
+  [GRAPHICS] DisableCoopEffectFilter=1
+  [GRAPHICS] RestoreCoopBulletMarks=1
+
+DisableCoopEffectFilter overi 28 bytu kodu od 0xA85C6C a meni pouze
+immediate instrukce mov edx,6 na mov edx,0 (adresa immediate 0xA85C7B).
+Updater tak zachovava globalni mExclusionTrait=0 i v MP. Lokalni exclusion
+priznaky efektu, lifecycle a kamerove masky nejsou timto patchem meneny.
+Pri necekanych bytech se zmena neprovede. Samostatny motion-blur flag zustava
+beze zmeny. Tato volba neni obecny odemykac uplne vsech omezeni rendereru.
+
+Release a Debug sestaveny, 8 offline testu probe uspesnych. Debug nasazen
+do hry, ASI a INI pred prepsanim automaticky zalohovany v scripts/
+.fusionfix-backups/ (timestamp 20260830-120611). ASI SHA256:
+78DE97A3363B74CCE8D1F955029B6F08C929E65800DB789790A5693AAFEFBD94
+
+Stary proces 32296 ukoncen, hra znovu spustena; novy proces 35776 reaguje.
+Bridge 35744 ponechan bezici. Log nove ASI potvrzuje oba graficke patche
+a puvodni HUD bez odmitnuteho canvas experimentu. F5 pro rollback jiz
+neni potreba; novy proces ma obnoveny kod. Read-only probe potvrdil NOP
+na bullet-mark gate, zmeneny kod exclusion filtru a masku 0 pri startu.
+Nova graficka funkcnost stale ceka na overeni uzivatelem v co-opu
+(stopy po strelach a efekty pro obe kamery). Obe graficke volby vyzaduji
+restart, nikoli F5.
+
+UZIVATELSKE OVERENI A VYSVETLENI HUD - 2026-08-30
+-----------------------------------------------
+
+Uzivatel po nasazeni potvrzuje, ze decals funguji a HUD se vratil do
+funkcni formy. Zatim si nevsiml zadnych efektu, ktere by prekazely.
+To je pozitivni prubezny test, nikoli uplne overeni vsech efektu,
+obou kamer ve vsech situacich nebo dlouhodobe stability.
+
+Obnoveny HUD je predchozi korekce MP rozlozeni, NE hotove SP rozlozeni.
+Aktivni herni [HUD] INI ma neutralni OffsetX=0, OffsetY=0, ScaleX=1,
+ScaleY=1. Hlavni empiricka korekce je primo v gameplay RESCALE vetvi:
+baseScaleX=0.8 a baseOffsetYFactor=0.25 (posun dolu o ctvrtinu vysky
+viewportu). Vypocet pouziva rozmery viewportu, ale sam o sobe jeste
+nezajistuje verne SP rozmistení. Manualni INI zustava jako dalsi doladeni.
+
+VRATNY LIVE TEST SP VETVI PRO EQUIP/HEAL/HEALNUM - 2026-08-30
+-----------------------------------------------------------
+
+Pred testem zaloha aktualniho funkcniho zdroje, projektoveho i herniho INI,
+nactene Debug ASI a PDB do recovery/checkpoints/
+2026-08-30-working-hud-decals-before-live-sp/. Nejde o stary checkpoint
+pred obnovou decals; tato zaloha obsahuje obe nove graficke opravy.
+
+tools/test-rerev2-sp-hud-live.py provadi pouze vratny pametovy test:
+  - Overuje proces rerev2.exe a cas jeho vytvoreni, hash konkretni ASI,
+    presmerovani E18040, prolog nacteneho sub_E18040 a update vtables.
+  - Test AL,AL -> XOR AL,AL zmenou jednoho bytu na 0x8E4067 (Equip),
+    0x8E99D1 (Heal), 0x8E9EA3 (HealNum). Jen tyto layoutove vetve dostanou
+    SP vysledek; globalni predikat a routovani hracu zustavaji beze zmen.
+  - Jen jejich vtable+0x58 smeruje na maly nativni thunk. V MP vola jiz
+    nacteny sub_E18040 s mode=0 (zakladni matice bez legacy .8/+0.25).
+    Mimo MP skoci na puvodni E18040 -> standardni ASI cestu. Kazda trida
+    ma pocitadlo skutecnych MP draw volani; nula neni dukaz opravy.
+  - Zadny JS/Python callback ve snimku, trvaly debugger ani novi game
+    threads. Proces se pozastavi pouze na kratkou validovanou transakci
+    zapisu; vzdy nasleduje resume. 8 KiB pro thunk+pocitadla zustava
+    alokovano do ukonceni procesu, i po restore, kvuli in-flight volanim.
+  - Nezmeneno ASI/INI na disku, aktivni C++ zdroj, titulky, crosshair,
+    menu, efekty, globalni HUD tuning ani geometrie hernich kamer.
+
+Prvni aplikace do PID 35776, stav+puvodni byty a hodnoty uzlu:
+  out/runtime/sp-hud-live-20260830-01.json
+  thunk allocation 0x01C10000; loaded ASI core 0x58AA1C40.
+
+Overeno ctenim po aplikaci: vsech sest existujicich controlleru obou
+hracu pouziva presne SP lokalni souradnice a scale=1 uvedene vyse.
+Heal draw counter vzrostl na 2596, Equip a HealNum zatim 0. Tyto dva
+mohou byt skryte nebo vykreslene jinou cestou; neprohlasovat jejich
+vysledne mapovani za overene. Hra stale reaguje. Uzivatel pozadan o
+kontrolu ve hre / kratke odpauzovani. Restart co-opu zatim neproveden.
+Vzhled, presnost mapovani a dlouhodoba stabilita NEJSOU timto potvrzeny.
+
+Kontrola (state obsahuje PID i creation time, chrani proti recyklaci PID):
+  python tools/test-rerev2-sp-hud-live.py --pid 35776 --mode inspect --state out/runtime/sp-hud-live-20260830-01.json
+Vraceni za behu, pokud test nevyhovuje:
+  python tools/test-rerev2-sp-hud-live.py --pid 35776 --mode restore --state out/runtime/sp-hud-live-20260830-01.json
+Pri pristi nativni aktualizaci se vrati MP hodnoty; muze byt treba
+kratce odpauzovat nebo obnovit co-op. Restart hry test take odstrani.
+6 offline testu thunk vetvi, rozsahu zapisu, kontroly ocekavanych bytu
+a rollbacku pri castecne chybe proslo. Thunk disassemblovan i v pameti.
+
+VYSLEDEK LIVE TESTU A PRICINA POLOVICNI VYSKY - 2026-08-30
+--------------------------------------------------------
+
+Uzivatel vidi naboje a bylinky, ale kolem poloviny vysky obrazovky
+a mensi nez v SP. Zamerovac hodnoti velikostne i z hlediska mireni
+jako funkcni; ten zustava na puvodni korigovane MP ceste, test jej nemeni.
+
+Nove cteni potvrzuje draw volani vsech tri testovanych trid:
+Equip=11389, Heal=45890, HealNum=11385. Jiz tedy nejde jen o zmenu
+lokalnich hodnot bez pouziti nove render cesty. SP lokalni souradnice
+a scale=1 nadale sedi u obou hracu. Hra reaguje.
+
+Konkretni namerena pricina: Equip resource 0x09DE8060 ma +0x78/+0x7C
+navrhove rozmery 1280x720. Viewport je 960x1080. Uzly maji lokalni
+scale=1, ale jejich vypoctena matice stale pouziva 0.75 v OBOU osach
+(uniformni zmenseni podle sirky, 960/1280). Uzel Equip 0x2AAB06F0:
+matice +0x10/+0x24 = 0.75; posun +0x40/+0x44 = (835.5, 475.5),
+presne (1114,634)*0.75. HealNum 0x2AA8F900 obdobne (835.5,434.25),
+tedy (1114,579)*0.75. To odpovida uzivatelovu pozorovani vysoko/male.
+Tyto maticove hodnoty jsou pred konecnou projekci, ne nezavisle mereni
+pixelu screenshotu. Neni duvod znovu hadat lokalni Y offsety.
+
+Dalsi navrhovany test: zachovat nativni SP souradnice a zmenit prevod
+SP plochy do uzkeho viewportu na X=960/1280=0.75, Y=1080/720=1.5.
+Pro Equip by matice pak davala Y=951 misto 475.5. Na jednom 16:9
+monitoru jde o horizontalne stlacenou SP variantu, kterou uzivatel
+drive pripustil; pri kazdem viewportu 16:9 by obe osy mely stejny pomer.
+Tato dalsi zmena dosud NEPROVEDENA. Aktualni live test ponechan beze zmen.
+
+LIVE TEST NEZAVISLEHO X/Y PREPOCTU - 2026-08-30
+---------------------------------------------
+
+Po souhlasu uzivatele rozsiren stejny live skript o plan-stretch, stretch
+a unstretch. Nativni E62A44/E63072 nejprve cte explicitni scale selector
+z node+0x80, bity 16..19; jen pri hodnote 0 pouzije bity 20..23.
+Pozor: drivejsi diagnosticke pole scaleMode=(flags>>20)&15 je pouze
+fallback selector, nikoli vzdy skutecne pouzity rezim.
+
+V sesti jiz znamych a overenych controller stromech (oba hraci,
+Equip/Heal/HealNum) nalezeno presne 10 uzlu s explicitnim rezimem 5.
+Pouze ten se zmenil na 2, napr. 0xFF150002 -> 0xFF120002. Ostatni bity,
+lokalni pozice, animation scale, resource i vlastnictvi zustavaji stejne.
+Nativni tabulka scalePairs[2] je overena proti source 1280x720 a aktualnimu
+viewportu 960x1080; je (0.75,1.5). Zadna nova empiricka Y konstanta.
+Pro obnovu nativnich matic pridan dirty bit 0x10000, ne zmeny matic rucne.
+
+Zaloha stavu pred timto krokem:
+  recovery/checkpoints/2026-08-30-working-hud-decals-before-live-sp/live-state-before-stretch.json
+Aktivni state out/runtime/sp-hud-live-20260830-01.json nyni obsahuje i
+puvodni/cilove layout flags, overovaci owner/vtable/root/resource a stav
+stretch=applied. Pred zapisem se overuji ocekavane byty i vlastnictvi.
+
+Namerene matice po nativnim prepocitani aktivnich ukazatelu hrace s
+controller.player=1: Equip (0.75,1.5), XY=(835.5,951), dalsi uzel
+(731.25,951); HealNum (0.75,1.5), XY=(835.5,868.5). Toto odpovida
+puvodnim SP souradnicim nasobenym X=.75/Y=1.5. U druhych instanci byly
+pri vzorku jeste stare matice; flag uz prepnuty, skutecne obnoveni jejich
+cache a vzhled vyzaduji dalsi vykresleni/overeni ve hre. Neprohlasovat
+oba viewporty vizualne za opravene jen na zaklade namerenych hodnot.
+Uzivatel pozadan o kontrolu spodni polohy a vysky naboju/bylinek.
+
+Slozeni je zatim zamerne vodorovne stlacene na uzkem viewportu;
+pri viewportu 16:9 by oba pomery byly shodne. Crosshair, titulky, menu
+a graficke patche nemenene. Hra i bridge ponechany bez restartu.
+11 offline testu proslo; Release build uspesny. Zadna nova ASI nasazena.
+
+Vratit pouze tento krok (ponecha prvni SP-vetve test):
+  python tools/test-rerev2-sp-hud-live.py --pid 35776 --mode unstretch --state out/runtime/sp-hud-live-20260830-01.json
+Mode restore nejprve vrati tento krok, pak puvodni vetve i draw sloty.
+Zmena selectoru je ZATIM VAZANA NA TYTO NACTENE STROMY. Nove stromy po
+obnove co-opu vyzaduji nove overeni/adresy a aplikaci; trvala implementace
+pro nove instance ani kompletni SP-style HUD tim jeste hotovy nejsou.
+
+UZIVATEL NEVIDEL ZMENU: PREPSANY SELECTOR A STARA CACHE - 2026-08-30
+-----------------------------------------------------------------
+
+Uzivatel ohlasil zadny rozdil. Nasledna kontrola zjistila, ze player=0
+ma explicitni selector znovu 5 (hra jej vratila), zatimco player=1 ma 2.
+Pouhe jednorazove prepsani hodnot proto nestacilo. Pridany male nativni
+post-update thunky pouze do vtable+0x24 stejnych tri trid:
+  Equip 0x01C10400, Heal 0x01C10600, HealNum 0x01C10800.
+Puvodni updater se vzdy zavola. Nasledne se zkontroluje split stav,
+node.owner==controller a pouze zname uzly z jeho +0xF8 tabulky. V MP
+se rezim 5 prepne na 2; mimo MP se nas rezim 2 vraci na puvodni 5.
+Ostatni rezimy a bity zustavaji beze zmen. Zachovan EAX vysledek a ABI
+registry EBX/ESI, bez SSE zasahu, externich callbacku nebo novych threadu.
+Pocitadla reapplications jsou na allocation+0x1020 + index*4.
+
+Nove rezimy pak zustaly 2, ale player=0 stale drzel stare matice.
+Pomohla cilena obnova CELEHO nativniho prepocitavani controlleru:
+refresh-stretch nastavi pouze cachedRectangle.right (controller+0x170)
+na -1. Nativni E17050 tim znovu sestavi tabulky a pres E1A240 oznaci
+cely strom k prepocitani. Nejde o zmenu skutecneho viewportu.
+
+PO refresh-stretch overeny matice OBOU hracu:
+  Equip scale=(0.75,1.5), XY=(835.5,951) / (731.25,951).
+  HealNum scale=(0.75,1.5), XY=(835.5,868.5).
+Reapplication counters Equip=10, HealNum=5 pri tomto vzorku. Hra reaguje.
+Uzivatel pozadan o novou vizualni kontrolu; vizualni uspech stale nepotvrzen.
+
+Aktivni state nyni stretch.updateHookStatus=applied. Mode unstretch/
+restore vraci i tri update sloty. Pri vraceni selectoru se toleruje
+nativni navrat na 5 a zachovavaji se pripadne nove nesouvisejici bity.
+Mode maintain-stretch instaluje update thunky, mode refresh-stretch
+vynuti obnovu jejich cache bez restartu. Scope stale jen tyto tri tridy;
+crosshair a ostatni GUI zustavaji na puvodni ceste. Trvale C++ reseni
+ani overeni vsech zmen scen/obnoveni GUI tim jeste hotove neni.
+
+CLAIRE POZICE POTVRZENA, ODDELENI PROPORCI; MOIRA JE ZVLAST - 2026-08-30
+-------------------------------------------------------------------
+
+Uzivatel potvrdil SPRAVNOU POLOHU HUDu Claire vlevo, ale ikony jsou
+protazene na vysku. Moira vpravo ma ukazatel baterky stale na stare pozici.
+POZOR na drivejsi formulace "oba hraci": sesti instancemi tri trid
+Equip/Heal/HealNum se neprokazalo pokryti obou VIDITELNYCH HUDu. Moira
+ma jinou tridu a controller.player sam o sobe neurcuje, co je prave videt.
+
+Zaloha potvrzene pozicni verze vcetne CLI a live state:
+  recovery/checkpoints/2026-08-30-confirmed-claire-position-before-aspect/
+Trvaly zdroj ani nasazena ASI se v tomto kroku nemeni.
+
+Nativni E625E0 provadi DVA samostatne prepocty:
+  E62A54: selector skaluje lokalni POZICI podle controller.scalePairs.
+  E6308A: MOVSS XMM1,[EAX+ECX*8+1C8] nacte X faktor pro GEOMETRII.
+  E630C5: odpovidajici Y faktor geometrie z +1CC.
+Kotva je v E63042/E63047 jiz zapsana do node+40/+44; posledni geometricky
+prepocet ji znovu nemeni. Zde lze odlisit tvar od umisteni.
+
+tools/test-rerev2-sp-hud-live.py pridava mode aspect / unaspect:
+  - jeden devitibajtovy MOVSS E6308A -> JMP do noveho nativniho thunku;
+    nahrazuje se PRESNE JEDNA cela instrukce, navrat E63093;
+  - kontrola effective selector=2, skutecne MP a presne ulozene identity
+    owner/controller vtable, resource/root, node adresy a node vtable;
+  - jen pro vybranych 10 uzlu z predchoziho testu se X faktor geometrie
+    nacte z Y polozky teze dvojice; ostatni uzly/SP jdou puvodni cestou;
+  - zachovany EFLAGS, vsechny GPR, SSE mimo puvodni cilovy XMM1;
+  - bez JS/Python frame callbacku, bez jineho zamerovace/menu/titulku;
+  - nova RX stranka pro kod a RW pro counter. Nic se neuvolnuje za behu;
+  - code patch transakce s kratkym suspend/resume a overenim bytu;
+  - refresh-stretch znovu invaliduje cele native controller cache;
+  - unaspect vraci pouze tento krok; unstretch/restore jej vraci prvni.
+Pri obnoveni se code hook odstrani i kdyz stary GUI strom uz neexistuje;
+stare adresy se pak NEobnovuji, refresh vrati varovani ve state souboru.
+
+Zvolena velikost tvaru: jednotne podle VYSKY viewportu (H/720), nikoli
+min/max podle sirky. Pri 960x1080 je tedy 1.5/1.5, zatimco polohy dale
+uzivaji .75/1.5. Tim se zachova velikost jako SP pri stejne vysce, ale
+ve velmi uzkem viewportu muze byt potreba resit sirku celku/prekryvy.
+Rozmisteni uvnitr zdedeneho stromu a pripadne prekryvy vyzaduji pohled
+ve hre, samotna shoda matice neni dukazem kompletne spravneho HUDu.
+
+Prvni pametovy vzorek po nativnim prepoctu:
+  Equip (player-field 1), node0: scale1.5/1.5, XY835.5/951.
+  Equip (player-field 1), node4: scale1.5/1.5, XY731.25/951.
+  HealNum (player-field 1), node0: scale1.5/1.5, XY835.5/868.5.
+  Kotvy jsou presne stejne jako pred timto krokem; counter=3.
+Kopie s player-field0 pri vzorku mely stale stare matice a cachedRight=-1:
+jejich cache se v tom okamziku NEPREPOCITALA. Neslibovat vsechny instance.
+U Heal node3/4 nelze slepe interpretovat +10/+24 jako stejnou matici;
+jinak typovane uzly mohou mit jina data. Uzivatel byl pozadan o overeni
+tvaru, velikosti a pripadnych prekryvu u Claire. Odpoved zatim nezaznamenana.
+
+MOIRA / uGUIFlash - jen cteni, zadny runtime zapis:
+  skutecna vtable139B558, draw slot139B5B0 -> E18040;
+  update slot+24 -> 8E8360, lokalni split predicate call8E8389;
+  TEST AL,AL na8E838E, SP vetev8E8401.
+  updater pres9683B0 ziska uzel index2 v controller+F8.
+  SP: X1114,Y634, localScaleXYZ1.
+  MP: X1496,Y667(pro player-field0)/559(pro1), scaleXYZ1.3.
+  Dalsi nativni podminka controller+2B1 take voli SP vetev; zachovat.
+  instance2A5CFD10(player-field1), root2AA94FE0, resource09657CA0,
+    node2=2AA9F540, flagsFF150000;
+  instance2A666430(player-field0), root2AAAE990, stejny resource,
+    node2=2AABDA00, flagsFF150000.
+Neni treba odhadovat Moirovu SP polohu; kod ji obsahuje. Jeji prenos do
+viewportu je dalsi uzce vymezeny krok po potvrzeni proporci Claire.
+Snapshot CLI nyni umi --class-name uGUIFlash; opraveno diagnosticke pole
+scaleMode na effective selector, pridany explicit/fallbackScaleMode.
+
+Overeni: 21 offline HUD testu (vcetne Capstone dekodovani skoku/ABI),
+8 graphics testu, uspesny Release build. Hra odpovida, bridge bezi.
+Nasazena ASI hash stale78DE97A3363B74CCE8D1F955029B6F08C929E65800DB789790A5693AAFEFBD94.
+Aktivni live state stale out/runtime/sp-hud-live-20260830-01.json.
+Zpet pouze na potvrzenou, ale protazenou variantu:
+  python tools/test-rerev2-sp-hud-live.py --pid 35776 --mode unaspect --state out/runtime/sp-hud-live-20260830-01.json
+Restart hry tyto live experimenty zrusi; nejsou soucasti ASI na disku.
+
+CLAIRE PROPORCE POTVRZENY; MOIRA A NATIVNI K/M V COOPU - 2026-08-30
+----------------------------------------------------------------
+
+Uzivatel potvrdil, ze nova rovnomerna geometrie Claire je dobra.
+Zaloha potvrzeneho state a CLI pred rozsirenim na Moiru:
+  recovery/checkpoints/2026-08-30-confirmed-claire-aspect-before-flash/
+
+MOIRA - provedeno za behu bez restartu, nezmenena ASI na disku:
+  tools/test-rerev2-flash-live.py
+  out/runtime/flash-live-20260830-01.json
+  parent out/runtime/sp-hud-live-20260830-01.json
+Nativni uGUIFlash update 8E8360, pouze TEST AL,AL na8E838E -> XOR AL,AL.
+Jeho SP vetev nastavuje node2 na1114/634 a scaleXYZ1; ostatni podminky
+zustavaji (vcetne controller+2B1). Samostatny draw thunk pouzije stavajici
+ASI core bez stareho empirical RESCALE. Native post-update wrapper
+udrzuje explicitni selector2 v MP a vraci5 v SP. Pouze dva overene
+Flash stromy, jeden explicitni uzel v kazdem.
+
+Geometricky hook je RETEZENY: novy Flash thunk na E6308A upravuje jen
+presne overene Flash uzly; ostatni uzly deleguje do nezmeneneho Claire
+aspect thunku. Zachova registry, flags i stack. Stary kod neprepisuje
+a zadnou alokaci neuvolnuje za behu. Flash restore vraci puvodni Claire
+redirect a vlastni branch/draw/update zmeny, pak jen vlastni GUI flags.
+
+DULEZITE: Flash obnovit PRED parent unaspect/unstretch/restore!
+Parent CLI bez geometry_override cizi redirect spravne odmitne.
+Aktivni celek lze kontrolovat pres Flash --mode inspect, ktery validuje
+i parent build a puvodni Claire aspect kod. Vsechny aktualni thunky jsou
+generovany ze state a validovany byte-for-byte.
+
+Namerene Flash(player-field1) po native draw:
+  localXY1114/634, localScaleXYZ1, matrixScale1.5/1.5, matrixXY835.5/951.
+  Draw counter4944, aspect counter1 v prvnim vzorku.
+Kopie player-field0 ma nove lokalni hodnoty, ale v tomto vzorku nebyla
+vykreslena; jeji stara/nulova matice neni dukaz chyby ani vizualni uspech.
+Uzivatel pote uvedl, ze poloha ikony baterky vypada v poradku. Presne
+porovnani s Moirou ve SP (Tab prepnuti postavy) zatim odlozeno.
+
+Flash inspect/restore (zmenit pouze --mode):
+  python tools/test-rerev2-flash-live.py --pid 35776 --parent-state out/runtime/sp-hud-live-20260830-01.json --state out/runtime/flash-live-20260830-01.json --mode inspect
+
+NATIVNI KLAVESNICE/MYS - konkretni pricina a prvni live test:
+Uzivatel chce zachovat dva gamepady a pripojeni Moiry stiskem Start,
+jen pro P1 povolit puvodni SP automaticke prepinani K/M <-> gamepad.
+Bridge pri testu F9 RELEASED, nikoli ukonceny/odpojeny.
+
+Native device auto-selection function 9885D0:
+  - call B42680 aktualizuje primarni gamepad profile;
+  - aktivita gamepadu/timery cfg+15C690/+15C694 a dalsi block+15C4F0
+    dale zustavaji funkcni;
+  - 988610 nacte *(157AE00), 988615 porovna mode+8F0 s1;
+  - JE na98861C skoci pri split mode1 do9886A7;
+  - 9886A7 vynuti cfg+15C4BC=0 a cfg+15C4C0=0 (gamepad) a vrati se;
+  - preskocena vetev988622 kontroluje klavesy a mouse delty;
+    klavesy nastavi primaryMode1/promptMode1, mys primaryMode1/promptMode2.
+Toto je konkretni lokalni vypnuti SP auto-detekce, ne globalni split flag.
+
+Patch tools/test-rerev2-input-live.py:
+  site98861C: 0F84 85000000 -> 0F84 00000000 (JE na dalsi instrukci).
+Jedna STESTIBAJTOVA instrukce pred i po; zadny blok vice jednobajtovych
+NOPu, do ktereho by pri obnoveni mohl mirit suspendovany EIP.
+Zachovany flags/registry/flow vsech ostatnich podminek, zadny novy hook
+ani polling worker. Pripojovani gamepadu a jejich prirazeni nezmenene.
+Build a okoli instrukce pinovano, pid+creation-time ulozeny ve state,
+kratka transakce se suspend/resume a rollbackem. Restore vraci pouze JE.
+
+CHYBNA PUVODNI INTERPRETACE (opraveno po hernim testu):
+Herni native vstupy maji podminku actor+7920==0:
+  A15521 (cmp [esi+7920],0), A155A5 (cmp cfg+15C4BC,1),
+  A155B9 vola keyboard movement A13DB0, pak cte mouse delty z+2C/+30.
+Jine action paths maji stejnou podminku, ale NENI to P1 guard.
+Obe lokalni postavy maji +7920==0, takze samotna auto-detekce zapne
+klavesnici/mys PRO OBA HRACE. Uzivatel tento problem potvrdil.
+Test -01 byl obnoven (--mode restore); puvodni JE je zpet. HUD nedotcen.
+Nemodifikovat actor+7920 globalne; jeho ostatni vyuziti neni zmapovano.
+Skutecne actor ID je byte+790C (native getter6FCDB0), prirazeni P1 je
+*(157AE00)+8F8, P2 +8FC. Runtime manager *(1567EAC)=260EC060:
+  slot0 ->2A180060, id0, category0;
+  slot1 ->2A238060, id1, category0; prirazeni[0,1].
+
+Input state out/runtime/input-live-20260830-01.json, PID35776:
+  cfg2709E060, global cfgpointer157D120;
+  sBioKeyboard instance26022210, pointer15DE918, vtable13C28F4;
+  sBioMouse instance23F50450, pointer15DE940, vtable13D77E8;
+  pred patchem primaryMode0/prompts0, timery0, otherBlock0;
+  po patche native primaryMode1/prompts2, splitMode1/splitState1;
+  playerAssignment zustalo[0,1]; primary pad profile enabled1,
+  backend1, index0 (tento profile cte B42680; neni to pridani noveho padu).
+To prokazalo obnoveni automaticke detekce, NE spravnou izolaci hracu.
+Herni test SELHAL: ovladal oba. Status state je ted restored.
+
+Input inspect/restore (zmenit pouze --mode):
+  python tools/test-rerev2-input-live.py --pid 35776 --state out/runtime/input-live-20260830-01.json --mode inspect
+
+Overeni tohoto kroku: 21 parent HUD +3 Flash +2 input +8 effects offline
+testu proslo; Release build uspesny, hra i bridge reaguji. Zadne nove
+ASI/INI nasazeni, zadny restart. Trvaly C++ prevod potvrzenych HUD/input
+zmen teprve nasleduje po hernim overeni; restart je zatim zrusi.
+
+OPRAVA IZOLACE NATIVNIHO K/M - 2026-08-30, LIVE TEST -02
+-----------------------------------------------------
+tools/test-rerev2-input-owner-live.py, state:
+  out/runtime/input-owner-live-20260830-02.json
+  PID35776, creation134325579750548000, allocation01DB0000, 12KiB;
+  8KiB RX thunky +4KiB RW citace, zadna nova runtime vlakna.
+Puvodni failed input-live -01 je restored; jeho samostatny --mode apply
+je zakazany, aby se omylem neopakoval test ovladajici oba hrace.
+
+Skutecna izolace: actor pointer v danem input callsite se porovna s
+  (*(1567EAC))->actors[(*(157AE00))->primaryAssignment]
+kde actors je pole pointeru na+20, primaryAssignment je int+8F8.
+Getter pole6E6DC0 (index0..7) a assignment getter886DD0 overeny a pinovane.
+Neni natvrdo Claire ani actor0. Zmena prirazeni automaticky zmeni ownera.
+Zadny zapis do actor+7920/+790C, cfg device mode, gamepadu ani HUD.
+
+28 overenych CMP instrukci (jejich presny seznam a actor registr v GATES)
+je presmerovano na nativni x86 thunk. Originalni CMP se vykona; pouze pokud
+vysel true a splitMode==1, prida se podminka primary actor pointeru.
+Neprimarnimu actoru se zrusi ZF, takze ORIGINALNI JE/JNE vybere gamepad
+vetev. Original false, SP a primarni actor zachovaji vsechny puvodni flags.
+SSE, GPR, stack a ostatni flags zustavaji zachovane. Neplatne prirazeni,
+chybejici actor manager nebo prazdny primary slot v MP => keyboard nepovolit.
+Actor se nove nedereferencuje; porovnava se pouze pointer se slotem hry.
+Pokriva keyboard movement/mouse-look A155A5, ostatni action predicates
+A14E29/A14ECA a A154E4..A186E6, alternativni camera path A126EF..A12AA4
+a native actor helpers7017D5/704635. Nejde o hromadnou zmenu +7920 guardu.
+Autodetekce98861C je povolena ve STEJNE kratke transakci az po owner hookach.
+Pri restore se vrati nejdrive autodetekce a pak owner hooky. Alokace zustava
+do konce procesu kvuli in-flight navratum. HUD hooky ani bridge se nemeni.
+
+OFFLINE overeni: tools/test-rerev2-input-owner-live-offline.py, 8testu,
+336 provedeni skutecneho x86 thunku v Unicorn2.1.3. Unicorn je JEN TESTOVACI
+CPU EMULATOR MIMO HRU, neni emulace gamepadu, neni injektovan do hry a
+neposila zadne vstupy. Lokalne out/toolchain/unicorn-2.1.3, instalace
+pripnute binarni wheel pomoci pip --only-binary --no-deps --target.
+Testy overuji registry vcetne SSE/ESP, flags, SP, oba hrace, prohozene
+prirazeni, invalidni/chybejici primary a zapisy pouze stack+diagnosticke citace.
+Release build uspesny. Pro chovani ovladani to stale NENI herni potvrzeni.
+
+Po live apply: hra i bridge reaguji, cfg primaryMode1/prompts2; prirazeni[0,1].
+Read-only citace: A155A5 primary879/blocked879/native2084,
+A14ECA primary7685/blocked7447/native0. Tedy v live hre se obe vetve opravdu
+rozlisuji. Uzivatel pozadan o WASD/mys/akce s F9 released, kontrolu ze Moira
+nereaguje, a nasledne navrat P1 na gamepad. VIZUALNI/HERNI VYSLEDEK CEKA.
+
+Inspect / restore (jen zmenit --mode):
+  python tools/test-rerev2-input-owner-live.py --pid 35776 --state out/runtime/input-owner-live-20260830-02.json --mode inspect
+Pri aktivnim owner testu nepouzivat legacy input-live inspect/restore;
+jeho puvodni pin na A155A5 spravne odmitne novy owner hook.
+Trvaly C++ prevod az po overeni. Restart zrusi tuto verzi i live HUD upravy.
+
+UZIVATEL POTVRDIL P1-ONLY NATIVNI K/M; SOUBEZNY P2 PAD TEST - 2026-08-30
+-------------------------------------------------------------------
+Uzivatel: "DObre, ovladam klavesnici jen hrace 1."
+Izolace z input-owner-live -02 tedy ma prvni pozitivni herni potvrzeni.
+Stale overit soubezne ovladani P1 keyboard/mouse a P2 gamepad, a prepinani
+device u samotneho P1. Live input hooky nebyly v tomto kroku upravovany.
+Zaloha potvrzeneho input skriptu+state a puvodniho bridge:
+  recovery/checkpoints/2026-08-30-native-km-p1-confirmed-before-pad-demo/
+
+Na zadost uzivatele byl bridge rozsiren o docasne chozeni/rozhlizeni P2,
+aby mohl soucasne hrat za Claire na nativni klavesnici. NENI to jina
+gamepad technologie: porad stejny vgamepad/ViGEm a dve zarizeni bridge.
+tools/gamepad_demo.py: opakovatelna 12s sekvence, LS max0.55, RS max0.32,
+LT aim; RT a vsechna tlacitka vzdy0. Vectorove vyvazene, navrat na presne
+svetove souradnice ale neni zarucen (kolize/kamera). Timeout1..300s,
+vychozi120s; pri jine foreground aplikaci oba pady neutralni.
+F2 zastavi pouze demo; F8/F9 jej zrusi pred zmenou routingu. F10 jako driv
+ukonci bridge a odpoji oba gamepady. F2 zvolen aby nekolidoval s F7/F11/F12
+nasich starsich freeze helperu. Vstupni zachytavani se pri startu uvolni.
+Private message-window CLI: tools/gamepad-bridge-control.py
+Prikazy status/start/stop/release/quit, P2 start vyzaduje --game-pid a overi
+read-only rerev2.exe a splitMode1/splitState1. Zadna Computer Use ani zmena
+game UI, zadny dalsi gamepad. Pred timto nemel bridge remote-control vstup.
+
+Stary bridge PID35744 byl ukoncen jeho message-loop WM_QUIT, nechal probehnout
+finally s neutralizaci/odpojenim; spusten novy bridge PID44820, --start-released,
+hidden, stdout/stderr out/runtime/bridge-demo-20260830.*.log.
+Hra PID35776 nebyla restartovana. Po odpojeni SP, uzivatel informovan o
+nutnosti znovu pripojit co-op. Nasledujici CLI start jiz overil aktivni MP
+a potvrdil captureEnabled=false/demoRunning=true (120 sekund).
+Vysledek soubezneho ovladani ceka na uzivatele.
+
+NASLEDNE ZMENY / OPRAVA CILOVEHO OVLDACE:
+Uzivatel pozadal o trvale F2 zapnout/vypnout automaticke pohyby. Zavedeno
+HOTKEYS.ToggleDemo=F2: zapne neomezenou sekvenci do dalsiho F2/F8/F9;
+F2 zapnuti samo overi foreground rerev2.exe + aktivni co-op (jen read-only).
+CLI start zustava omezeny1..300s. Pri ztrate focusu se pad neutralizuje.
+Uzivatel potom potvrdil, ze puvodni hardcoded bridge.pads[1] hybal CLAIRE,
+NE MOIROU. Demo okamzite zastaveno pres CLI. Ciselnik virtualnich zarizeni
+se nesmi zamenovat s prirazenim hernich postav. Predchozi popis "jen P2"
+tedy platil pro cislo bridge zarizeni, nikoli overeneho game actora.
+Pridan BRIDGE.DemoPad a CLI --pad1/--pad2 (s mezerou v prikazu), aby sel
+cil zmenit za behu BEZ odpojeni gamepadu. Vychozi DemoPad1 je opacne
+zarizeni proti neuspesnemu pokusu; po novem joinu potvrdit Moiru ve hre.
+
+Kvuli nacteni vyberu zarizeni a trvaleho F2 byl bridge PID44820 korektne
+ukoncen vlastnim CLI quit a spusten bridge PID36040. Logy:
+  out/runtime/bridge-demo-v2-20260830.stdout.log/.stderr.log
+SDK dotaz po vytvoreni: bridge pad1 = XInput slot0, bridge pad2 = slot1.
+Hra PID35776 nebyla restartovana, input owner patch i HUD hooky zustavaji.
+Uzivatel pozadan znovu pripojit co-op; F2 uz je v teto verzi plne funkcni.
+8 offline testu demo/bridge proslo vcetne stubovaneho update loopu:
+vybrany pad obdrzi LS/RS/LT, druhy nic; pozadi/timeout/capture => neutral;
+F2 on/off, odmitnuti startu mimo coop. Zadna dalsi realna zarizeni v testu.
+
+AKTUALNI TESTOVACI F2 CYKLUS - 2026-08-30
+--------------------------------------
+Na novou zadost uzivatele F2 nyni cykluje:
+  vypnuto -> pohyb bridge ovladac1 -> pohyb bridge ovladac2 -> vypnuto.
+Pri prepnuti je predchozi pad neutralizovan dalsim updater tickem;
+keyboard/mouse zustavaji released. Zadne automaticke pripojovani Startem,
+zadny attack/interact, zadne odpojovani pri F2. F8/F9 zrusi demo jako driv.
+Prvni F2 z vypnuteho stavu VZDY zacne ovladacem1 (ne hodnotou DemoPad).
+CLI --pad umoznuje explicitni vyber nezavisle na F2; CLI start ma timeout.
+F2 je testovaci souvisla sekvence az do dalsiho prepnuti/vypnuti.
+
+Uzivatel upresnil a potvrdil, proc se cil pri opakovanem joinu menil:
+HRA VZDY PRIRADI OVLADAC, KTERY STISKL START, HRACI2. Proto bridge pad1
+ani pad2 neznamenaji pevne Claire/Moira. Zadna dalsi oprava native input
+owner hooku z tohoto pozorovani nevyplyva; netvrdit, ze je to bug K/M.
+Cyklus umozni zvolit spravny pad bez znalosti predchoziho joinu.
+
+K nacteni cyklu byl bridge36040 ukoncen vlastnim CLI quit a spusten27344,
+--start-released, initial demo off, control status f2Mode=cycle.
+Logy out/runtime/bridge-demo-cycle-20260830.stdout.log/.stderr.log.
+Hra35776 stale stejna instance; zadny game restart a zadna zmena ASI.
+8 offline testu proslo, vcetne off->pad1->pad2->off->pad1 a neutralizace
+nevybraneho padu. Release build uspesny. Uzivatel bude zkouset F2 ve hre.
+
+POTVRZENY SOUBEH A ZBYVAJICI CAPTURE PROBLEM - 2026-08-30
+-----------------------------------------------------
+Uzivatel potvrdil funkci F2 cyklu i soubezne chozeni Claire klavesnici/mysi,
+zatimco se Moira hybe virtualnim gamepadem. To je pozitivni herni overeni
+native P1 izolace; oba zdroje muzou bezet soucasne.
+Samostatne hlasi, ze v gamepad capture rezimu mys stale ovlada nativni
+kameru Claire, nikoli jen vybrany virtualni gamepad. Overujeme F9 capture
+stav, XInput right stick a native mouse delty; zatim to neni opravene.
+
+LIVE CAPTURE RELAY - 2026-08-30
+-----------------------------
+Native sBioMouse update A79490 ->C273E0 ->C277A0; C27987 vola mouse
+device vtable+24 s velikosti0x14 (DIMOUSESTATE2), C279D7/Ef/Fe zapisuje
+deltaXYZ na mouse+2C/+30/+34. Vedle toho cte GetCursorPos/ScreenToClient.
+Bridge zachytava legacy Windows mouse zpravy a posila RawInput do
+virtualniho praveho sticku. Povoleni native inputu v MP proto potrebuje
+koordinaci se skutecnym capture stavem, ne jen owner izolaci hracu.
+
+tools/sync-rerev2-bridge-capture.py:
+  - overi pinned ASI a aktivni parent input-owner -02 (vsech28hooku);
+  - cte captureEnabled z private IPC bridge27344 po20ms;
+  - pouze pri zmene prepise native selector98861C v kratke suspend/resume
+    transakci s expected-bytes guardem;
+  - released: 0F8400000000, potvrzena native auto selection (owner hooky
+    stale povoli klavesnici pouze P1 v MP);
+  - captured: E98600000090, unconditional JMP9886A7 vynuti padmode0/prompts0,
+    v MP i SP. Native gamepad polling se nemeni. Posledni NOP neni vykonavan;
+    nemuze v nem beznym pruchodem zustat EIP pri obnove puvodniho JE6bytes.
+  - zadne callbacky do herniho vlakna, zadne JS/Frida, zadna dalsi gamepad
+    emulace, zadny game/bridge restart a zadne HUD/input owner zmeny.
+  - mutex omezi relay na1/proces; named event pro --mode stop; normalni
+    ukonceni/bridge exit obnovi auto; IPC timeout fail-open na auto.
+  - Pri nasilnem zabiti relay behem captured muze zustat gamepad branch;
+    --mode stop ji obnovi z presneho state. Jde zatim o docasny live helper.
+  - Stop RELAY PRED restore parent input-owner. Parent inspector pri captured
+    spravne odmitne cizi selector branch; pouzit relay --mode inspect.
+
+Overeni:5 capture branch testu+8bridge testu+8input CPU testu proslo.
+Live shutdown prvniho relay -01 vratil presne0F8400000000. Kratky live
+force-gamepad test (150ms, finally restore) skutecne zmenil cfg mode/prompts
+na0/0. Zpet obnoveno auto. Release build uspesny.
+Prvni read-only22s vzorek byl bez pohybu a capture=false, proto z nej
+NELZE vyvozovat funkcni mouse/gamepad prepinani. Uzivatel pozadan o F9
+captured+F8 Moira+mouse a nasledny F9 released+native Claire test.
+
+Aktualni relay PID35632, game35776, bridge27344; state:
+  out/runtime/bridge-capture-20260830-02.json
+Logy out/runtime/bridge-capture-v2-20260830.stdout.log/.stderr.log.
+Prvni relay23404/state-01 byl korektne ukoncen kvuli testu obnovy a nacteni
+odolnejsiho zapisovani state/cleanup; bridge ani hra pri tom restartovany nebyly.
+Pri priprave capture=false, selectorauto, bez chyb v logu.
+2026-08-31: uzivatel potvrdil "Ano, takhle je to super" a presel na zamerovac.
+Capture opravu tedy povazujeme za herne potvrzenou; stale jde o live helper.
+Stop/inspect (zmenit --mode):
+  python tools/sync-rerev2-bridge-capture.py --pid 35776 --parent-state out/runtime/input-owner-live-20260830-02.json --state out/runtime/bridge-capture-20260830-02.json --mode inspect
+
+RETICLE: SP TVAR A VIEWPORTOVA POZICE - LIVE TEST 2026-08-31
+--------------------------------------------------------
+Pred zmenou ulozen potvrzeny HUD/input/capture stav do recovery/checkpoints/
+2026-08-31-confirmed-hud-input-before-reticle/. Obsahuje ASI, zdroj, INI,
+bridge a vsechny aktivni live skripty/stavy. Samotna ASI nema live opravy!
+
+Nativni uGUIReticleBase vtable13A3868, draw slot13A38C0, update slot13A388C.
+Update94FC00 nastavuje node0 na MP(800,360), scaleXYZ2; SP(640,360), scaleXYZ1.
+Pozor: TEST AL,AL je94FC3C, nikoliv call9553D0+5! Mezi nimi je PUSH ECX,
+MOV ECX,ESI. Jednobajtova zmena84->30 na94FC3C vybere jen SP layout.
+Base update94FA20 nadale ridi viditelnost/animace konkretni zbrane.
+Globalni split predikat9553D0, owner routing, kamera ani raycast nemenime.
+Scope/Throw maji jiny update950710->94FCC0; zatim BEZ zmen.
+Natalia ma vlastni vetveni9500EE/9500F3, take zatim BEZ zmen.
+
+Pred testem snapshot pri uzivatelem drzenem mireni:
+  P1 Base2A656DF0, node0=2AA97220, source1280x720, viewport960x1080.
+  local800,360 scale2; selector5; matrix600,270 scale1.5,1.5.
+  Stara ASI na vystupu pouzivala X*.8, Y+height*.25 (INI doladeni1/0),
+  tedy stred480,540, ale tvarX1.2,Y1.5. Pozice neni univerzalni pro jine AR.
+  Druha nactena instance2A5D7120/node2AA846F0 patri playerfield1, nebyla
+  viditelna. Samotna existence uzlu nebo jeho stare matice neni dukaz kresleni.
+
+tools/test-rerev2-reticle-live.py:
+  - layout-only TEST patch na SP, jen pro Base tridu;
+  - draw thunk Base vola nacteny ASI core(mode0) jen v MP; SP puvodni cesta;
+  - post-update wrapper drzi node0 selector2 v MP a vraci5 v SP;
+  - pozice pouziva par2 = viewportW/1280, viewportH/720;
+  - geometry X loadE6308A pro presne overeny node0 pouzije Y faktor tehoz
+    paru, tedy oba rozmery tvaru viewportH/720; pozicni cast se tim nemeni;
+  - nezasazene uzly deleguji do Flash aspect hooku, ten do Claire hooku;
+  - source1280x720, vtable, owner, resource/root, kod rodicu a ASI hash guards;
+  - zadny Frida/Python callback v hernim vlakne, zadne externi per-frame zapisy;
+  - vyuziva kratke transakce s rollbackem; RX/RW stranky se po restore nefreeuji
+    kvuli rozpracovanym volanim. Stav patri konkretni process creation identity.
+
+Nasazeno do STEJNEHO PID35776, identity134325579750548000, allocation01E00000.
+State out/runtime/reticle-live-20260831-01.json. Parent geometry Flash01DA0800.
+Po nasazeni aktualni P1node: local640,360 scale1, selector2;
+matrix480,540 scale1.5,1.5. Draw counter2770, aspect1 (prepocet pri dirty).
+P2 neviditelna instance ma SP local hodnoty, ale zatim neprepocitanou matici.
+7 reticle offline testu +21 parent HUD +3 Flash proslo; Release build uspesny.
+CPU testy zahrnuji uzky,16:9,ultrawide viewport, fallback SP/ciziho uzlu,
+nezmenene GPR/SSE mimo nativni destination, zachovani flagu a rozsah zapisu.
+Jednotlive zamery strelby a vizualni SP porovnani CEKAJI na uzivatele.
+Nedeklarovat vsechny zbrane/rozliseni herne overene jen z matematiky/kompilace.
+
+Restore poradi: RETICLE -> FLASH -> CLAIRE. Pro kontrolu aktivniho retezce:
+  python tools/test-rerev2-reticle-live.py --pid 35776 --hud-state out/runtime/sp-hud-live-20260830-01.json --flash-state out/runtime/flash-live-20260830-01.json --state out/runtime/reticle-live-20260831-01.json --mode inspect
+Pro odebrani jen reticle testu zmenit --mode restore. Parent inspectory pri
+novem vnejsim geometry hooku spravne odmitnou cizi redirect. Input/capture
+zustava oddeleny. Pri recreate GUI stromu znovu scan/plan, ne stare adresy.
+
+UZAVRENI SESSION - 2026-08-31
+---------------------------
+Uzivatel vyzkousel pistoli: "vse se zda ok". Pistolovy reticle ma tedy
+pozitivni herni overeni. Brokovnici chce vyzkouset zitra; ocekavani uspechu
+neni vysledek testu. Dalsi zbrane/rozliseni a prime SP srovnani neovereny.
+Priste navazat overenim brokovnice a naslednym trvalym zapracovanim
+potvrzenych live uprav; zatim nejsou soucasti ASI na disku.
+
+Pri poslednim procesovem dotazu uz hra35776 ani capture relay35632 nebezely;
+bridge27344 stale bezel. Pred pokracovanim znovu zjistit aktualni procesy.
+Stare JSON stavy NENASAZOVAT do nove instance hry. Znovu overit build/adresy
+a sestavit HUD -> Flash -> reticle retezec, input owner a capture relay.
+
+Pozadavek uklidit slozky/nahravky patril do jineho chatu a uzivatel ho odvolal.
+Zadne slozky ani soubory nebyly pri tomto pozadavku presunuty nebo smazany.
+Recordingy ani jejich procesy v ramci RE:Rev2 neresit.
+
+INVENTAR: PRIPRAVA SP/MP SROVNANI 3D NAHLEDU - 2026-08-31
+-------------------------------------------------------
+Uzivatel se rozhodl pokracovat jeste 3D nahledem predmetu v inventari.
+Spustena hra pres rerev2.exe; launcher46124 predal beh procesu25124,
+creation identity134326821210490783. Deployed Debug ASI hash stale78DE97A3...
+Bridge27344 ponechan bez restartu, demo stop a capture release pres vlastni IPC.
+Do nove hry zatim NENASAZENY stare live HUD/input/reticle adresy ani nova oprava.
+Uzivatel pozadan otevrit SP inventar s viditelnym modelem a identifikovat predmet.
+
+Dosavadni poznatky jsou staticke, nikoliv vizualne overena pricina:
+  - Campaign object vtable139CCC8; type accessor8F7D20; update slot+24=8F8970;
+    draw slot+58=139CD20. Stary enum v dllmain ma zavadejici jmeno cCompose.
+  - Campaign+2CC -> samostatny uItemDraw, vtable13BF4D0, nikoliv GUI node.
+    Verified ctor96B4C0 a native reflection96BB50 potvrzuji:
+    +84 mScreenViewNo (requested), +88 aktualne pripojeny screen view,
+    +8C mDrawViewNo (cilovy herni view), +90 mIsOverlay,
+    +94 current item, +9C mSetId, +A4/A8/AC/B0 mDrawArea L/T/R/B,
+    +E0 camera, +100 composite object. Jde o HEX offsety.
+  - Native position96C410 pouziva min(viewW/1280,viewH/720).
+    Stary ASI sub_96C410 na7calls pridava v MP X=(720*celkoveAR)-800.
+    SP pridava pouze widescreen centering. +8C/+90 jsou decimal140/144 ve C++,
+    NE hexadecimal+140/+144 (ty patri jine strukture GUI controlleru).
+  - Native size96C4D0( width ) odvozuje height=floor(width*720/1280),
+    pak96C500 nastavuje right/bottom pomoci view HEIGHT/720 pro OBE osy.
+    Pozice a velikost tedy maji odlisne skalovani uz v nativnim kodu.
+  - Campaign call8F7A29 meni pozici,8F7A54 vola size96C4D0;
+    okolni9553D0layout branches voli SP x600,y126,width380;
+    MP x714.84,y126/34,width463.6 (pred int konverzi a ASI offsetem).
+    Dalsi rezimy inventare maji samostatne cesty8FA254/8FA2E5.
+  - uItemDraw update96BF00 kopiruje mDrawArea na+70..7C, zachovava native
+    draw-view routing a vytvari vlastni kameru96B870 a composite96BD30.
+    Overlay pouziva vlastni routing; nezamenovat 3D draw s HUD drawE18040.
+  - Shader/FOV muze predstavovat dalsi pricinu deformace; dosud NEOVERENO.
+
+Rozsiren read-only snapshot-rerev2-gui-controllers.py o Campaign a itemPreview,
+s volitelnym --output do NOVEHO JSON souboru (bez prepsani). 4 offline testy OK.
+Prvni scany byly pred nactenim herniho inventare a vratily0 objektu; nejsou
+dukazem chybejici tridy/modelu. Zadne per-frame Frida hooky ani pametove zapisy.
+SP referenci poridit az uzivatel potvrdi otevreny inventar, pak stejne v MP.
+
+OBNOVENI LIVE OPRAV A TRVALY PORT - 2026-08-31
+-------------------------------------------
+Game25124/identity134326821210490783 zustal bez restartu. Znovu provedena
+verifikace nativnich instrukci a noveho GUI stromu. Aplikovany vsechny potvrzene
+live opravy HUD -> Flash -> ReticleBase, input owner28gates a capture relay53160.
+Bridge27344 bez restartu, capture release. State soubory vsechny s novym suffixem
+20260831-03.json, viz DEVELOPMENT. P1 reticle po update local640,360 scale1,
+matrix480,540 scale1.5,1.5; nenulovy draw counter. Stare adresy procesu35776
+nebyly recyklovany. Current gameplay source build zustava neotestovany ve hre.
+
+Na zadost uzivatele trvaly port do source/ResidentEvilRevelations2.FusionFix:
+  CoopNativeCode.h: sdilena x86 code-generation definice pro ASI/offline testy;
+    vsech28inputownerthunku je byte-for-byte shodnych s potvrzenym live kodem.
+    Jediny geometry hook hledá pet overenych trid a konkretni node-table indexy,
+    ne minule heap adresy. Geometrie Y/Y, umisteni nezmeneno (nativni X/Y).
+    Vstupni capture branch cte flag, neprepisuje kod kazdy frame.
+  CoopRuntime.h: update/draw wrappers, expected-bytes/vtable guards, persistent
+    selector maintenance, native P1 gate instalace, background bridge IPC.
+  dllmain.cpp: zahrnuti runtime a restart-only COOP options; tuning thread20ms
+    poll bridgecapture, IPC timeout100ms mimo herni vlakno; nevyzaduje relay.
+  INI COOP.ViewportHud=1 / NativeKeyboardMousePlayer1=1. Zadny globalni SP spoof.
+  Inventory/crosshair Scope/Throw/Natalia nespadaji do nove HUD scope.
+Build se NESMI automaticky nasadit: uzivatel chce nechat aktualni opravy jen
+v pameti a pripravit ASI pro pristi spusteni. Deployed hash78de97a3... zustava.
+Soucasny live bridge/relay NESPOUSTET podruhe; novy build externi relay nepotrebuje.
+Checkpoint pred portem: recovery/checkpoints/2026-08-31-before-permanent-hud-input/.
+
+INVENTAR: ZACHYCENE SP/MP GREEN HERB REFERENCE
+-------------------------------------------
+SP snapshot: out/diagnostics/inventory-sp-green-herb-20260831-01.json.
+Campaign2A63D680/player0, node192=2A9AE660 local78,138 scale1;
+matrix117,207 scale1.5/1.5. uItemDraw2A866370 currentItem769(0x301),
+screenview6/drawview0/nooverlay; mDrawArea900,189,1470,508 =570x319.
+Camera near16 far4e6 aspect16:9 FOV40.
+Checkpoint recovery/checkpoints/2026-08-31-before-inventory-preview/.
+
+MP snapshot: out/diagnostics/inventory-mp-green-herb-20260831-01.json.
+Stejny Campaign/node/uItemDraw, screenview6/drawview0/nooverlay.
+Node192 local78,138 scale1.22; matrix58.5,103.5 scale0.915/0.915.
+Na GUI vystup se navic aplikuje legacy ASI X*.8 a Y+viewportH*.25.
+Preview mDrawArea895,94,1589,484 =694x390; cilovy P1 viewport0,0,960,1080.
+Native item camera2A790380 MA STEJNE near/far/aspect/FOV jako SP.
+Preview tedy presahuje pravou hranu P1viewportu, potvrzeno uzivatelem:
+inventory je mensi nezSP, bylina se ukazuje az na Moirine hlave v P2viewportu.
+Zadna nova inventory oprava zatim neaplikovana. Nelze opravovat kameru/FOV
+jen podle domnenky: u tohoto predmetu jsou hodnoty SP/MP shodne.
+
+TRVALY BUILD / PRVNI IZOLACE PREVIEW - 2026-08-31
+-----------------------------------------------
+Release ASI sestavena v out/packages/rerev2/release/scripts/:
+SHA256 8E527E0B43F6C7358082AD14C07DB5BD79B336BF7A0DDD657AB121254E9FD592.
+Deployed ASI SHA25678DE97A3... beze zmeny (overeno po buildu).
+7 produkcnich C++/CPU testu proslo (vcetne prevzatych28gate CPU pripadu),
+dale21HUD+3Flash+7Reticle+5capture+4snapshot testy OK. Novy ASI zatim nebyl
+nacten do hry; F9 IPC i recreate-GUI logiku je potreba overit pri pristim startu.
+
+Prvni inventory experiment je pouze jednorazovy zapis16B mDrawArea do
+staleho P1 Green Herb uItemDraw2A866370:895,94,1589,484 ->428,384,706,540.
+Prepocten puvodni ASI Xoffset a rozdil nativniho FIT vs HEIGHT scale;
+fit puvodni pomer stran obrazu do prostoru transformovaneho legacy GUI.
+Zadny novy codehook, kamera, render view, jine GUI ani externi frame writer.
+tools/test-rerev2-item-preview-live.py;3offline matematicke testy OK.
+State out/runtime/item-preview-live-20260831-01.json. Test je zamerne omezeny
+na presny zachyceny Green Herb/P1/1920x1080 stav; ne obecna hotova oprava.
+Zmena predmetu muze rectangle znovu prepocitat. Cela velikost inventare
+zustava nezmenena. Uzivatel ma overit, zda je nahled nad textem v P1panelu.
+Restore: python tools/test-rerev2-item-preview-live.py --pid 25124 --state out/runtime/item-preview-live-20260831-01.json --mode restore
+Restore ma guards pro stejny predmet/referenci/MP. Pri jinem stavu nedrzet
+stare rect nasilim; znovu zkontrolovat, jestli ho uz nativni hra neprepocitala.
+
+DOPLNENI: jednorazovy -01 test byl okamzite prepocitan hrou zpet; status je
+native-recomputed, nikoliv aktivni/viditelny fix. Neni treba ho obnovovat.
+Nasledne -02 zavedl maly nativni size-call wrapper na Campaign call8F7A54.
+Original96C4D0(width) bezi beze zmeny, pak MP+exactCampaign/currentuItemDraw+
+GreenHerb769+drawview0+nooverlay guard aplikuje rectangle428,384,706,540.
+SP/jiny item/owner bezi puvodne. Zachovava calling convention(ret4), puvodni
+returnEAX/flags/nonvolatile regs; nepouziva SSE; 6 offline CPU/math testu OK.
+State out/runtime/item-preview-live-20260831-02.json, allocation01C00000.
+Po aplikaci correctionCalls49, mDrawArea I nativni+70..7C=428,384,706,540.
+To dokazuje aktivni prepocet, nikoliv jeste spravny vizualni vysledek.
+Vykresleni nad textem Green Herb CEKA na uzivatelovo potvrzeni.
+Inventory GUI velikost nezmenena; tento experiment NENI soucasti nove ASI.
+Restore code: python tools/test-rerev2-item-preview-live.py --pid 25124 --state out/runtime/item-preview-live-20260831-02.json --mode restore
+Restore odstrani CALL hook nezavisle na trvani puvodniho GUI stromu;
+RX/RW pages ponechane do game exit kvuli rozpracovanemu volani.
+
+SESSION QUICK MENU / INVENTAR - 2026-09-01
+-----------------------------------------
+Game PID25124 / creation134326821210490783 byl uzivatelem ukoncen. Hru znovu
+NESPOUSTET bez noveho pokynu. Osiřely bridge10432 byl pote korektne ukoncen;
+capture relay pri restartu uz selhal, protoze herni proces prave koncil. Vsechny
+live JSON adresy z teto session jsou pro pristi proces STALE a nesmi se znovu
+nasadit bez noveho scan/plan.
+
+Posledni bezpecna a uzivatelem kladne hodnocena inventory varianta byla
+out/runtime/inventory-adaptive-live-20260831-01.json (mode0, object hash
+9e2a6ff1553af2c3b2f18ab6b25c0d2dc26553964d10fe0115207d7b4ef626a7):
+  canonical visible bounds0,0,980,650; max scale viewportHeight/720;
+  uniformne zmensovat jen kdyz se obsah do viewportu nevejde;
+  MP1920x1080 desired0.9795918465, root ratio proti native0.75 =1.3061224222;
+  generic uItemDraw oprava bez whitelistu predmetu.
+Experimenty -02/-03/-04 s jinym RESCALE/render sentinel byly vizualne spatne
+nebo bez uzitku a vzdy vraceny na -01. Presne kompenzovany -04 sice reprodukoval
+mode0 shader konstanty, ale prekryv Quick Menu nezmenil. POZOR: aktualni
+source/ResidentEvilRevelations2.FusionFix/InventoryPreviewLive.asm stale
+obsahuje diagnostickou -04 variantu, nikoliv bezpecnou -01; pred trvalym buildem
+ji vratit/portovat na potvrzeny mode0 zaklad. Deployed ASI nebyla zmenena.
+
+Campaign SP/MP Quick Menu snapshots:
+  out/diagnostics/inventory-layout-mp-quick-menu-20260831-01.json
+  out/diagnostics/inventory-layout-sp-quick-menu-20260831-01.json
+Vsech255 Campaign node local positions/scales/layoutFlags bylo shodnych SP/MP
+mimo nas adaptive root node192. MP matice byly jednotne SP*desired/SPscale;
+samotny Campaign strom tedy nevysvetluje prekryv male ikony zbrane a D-padu.
+uItemDraw ma v Quick Menu currentItem0, takze prekryv neni item preview.
+
+Potvrzena pricina maleho horniho bloku je samostatny uGUIEquipShortcut:
+  vtable139AFB0, update8E53F0, aktivni objekt v teto session2A872940/player0,
+  table root node0=2AABAFF0, local position340,280, scale1.
+  MP cached viewport960x1080: selector5 -> matrix pos255,210 / scale0.75.
+  SP cached viewport1920x1080: selector5 -> matrix pos510,420 / scale1.5.
+  Vsech21 local node hodnot je SP/MP shodnych; rozdil je presne faktor2.
+Uzivatel dodal spravnou SP referenci: ikonka zbrane + ammo + ciselnik Quick
+Items jsou nahore a popis Handgun MPM pod nimi; cely panel i normalni inventory
+jsou v SP zarovnane ke stredu, v MP byly prilis vysoko.
+
+Pridan reprodukovatelny live test tools/test-rerev2-equip-shortcut-live.py.
+Chaining: Reticle aspect -> Flash -> Equip/Heal. Test meni pouze Shortcut
+root node0 na selector2 v MP; X pozice zustava viewportW/1280, Y pozice a oba
+rozmery geometrie pouziji viewportH/720. V SP se selector vraci na5. Nezasahuje
+do Campaign textu, item preview, inputu ani gameplay uGUIEquip. SP plan i apply
+prosly a v SP matice zustala510,420 scale1.5. State
+out/runtime/equip-shortcut-live-20260901-01.json vsak patri ukoncenemu procesu.
+MP vizualni overeni se NESTIHLO: hra skoncila pri restartu bridge. Neprohlasovat
+Shortcut opravu za potvrzenou, dokud ji uzivatel neuvidi v novem MP procesu.
+
+Prvni krok priste:
+  1. spustit hru/bridge az na pokyn uzivatele, vytvorit cerstve HUD->Flash->
+     Reticle retezce a novy Shortcut scan/plan/state;
+  2. v SP zachovat referenci, v MP overit Shortcut: ocekavane matrix X255,
+     Y420, geometry scale1.5/1.5 (stred/velikost SP v levem viewportu);
+  3. oddelene opravit svisle centrovani celeho Campaign inventare. Safe -01
+     zatim meni scale, ale nepridava potrebnou Y translaci, proto jsou inventory
+     i jeho Quick Menu v MP stale vyse nez ve SP;
+  4. az po obou vizualnich potvrzenich portovat do source, offline testy,
+     tools/build.ps1 Release. Build bez vyslovneho pokynu nenasazovat.
+
+Read-only node snapshot tool byl zobecnen o --vtable/--node-count a filtruje
+jen uzly s overenym owner backlinkem:
+  tools/snapshot-rerev2-inventory-layout.py
+MP/SP Shortcut data:
+  out/diagnostics/gui-mp-quick-uGUIEquipShortcut-active-20260901-01.json
+  out/diagnostics/gui-sp-quick-uGUIEquipShortcut-active-20260901-01.json
+
+NASAZENI TRVALEHO CO-OP HUD/INPUT BUILDU - 2026-09-01
+-----------------------------------------------------
+Pri prvnim startu nove relace byl omylem ponechan stary nasazeny Debug ASI
+SHA256 78DE97A3...; proto v novem procesu chybely trvale opravy keyboard/mouse,
+Equip/Heal/HealNum, Flash a ReticleBase. Prace nebyla ztracena. Spravny Release
+kandidat zustal v puvodnim projektu v out/packages/rerev2/release/scripts/:
+SHA256 8E527E0B43F6C7358082AD14C07DB5BD79B336BF7A0DDD657AB121254E9FD592.
+
+Po vyslovnem souhlasu uzivatele byl proces 62216 ukoncen, bridge PID49104
+ponechan bezici a Release ASI i jeho INI s [COOP] byly nasazeny do hry pres
+tools/deploy.ps1 -OverwriteIni. Predchozi soubory jsou vratne zalohovane v
+herni scripts/.fusionfix-backups/ jako timestamp 20260901-114445-620/640.
+Novy proces hry PID40284 nacetl ASI primo z herniho scripts adresare.
+
+Read-only overeni pameti noveho procesu:
+  - geometry redirect E6308A -> 07A20000;
+  - vsech pet vtable update hooku smeruje do nacteneho ASI, draw hook je
+    58C6A230 a layout TEST je u vsech zmenen na XOR (30 C0);
+  - input capture 98861C -> 07A31C00;
+  - vsech 28 input ownership gates je presmerovano do 07A30000...;
+  - bridge hlasi captureEnabled=false, tedy nativni keyboard/mouse cesta je
+    aktualne uvolnena; F9 ji muze znovu prepnout.
+
+Tento Release stale neobsahuje pozdejsi inventory ani uGUIEquipShortcut live
+experimenty. Je to zamysleny trvaly zaklad pro jejich dalsi vratne testovani.
+
+NOVA VIZUALNI REFERENCE A OBNOVA SAFE INVENTORY -01 - 2026-09-01
+----------------------------------------------------------------
+Uzivatel po nacteni co-opu na trvalem Release 8E527E0B... potvrdil:
+  - Quick Weapon Menu je bez dalsiho hooku spravne; text i ikona prirazeni
+    zbrani jsou presne na pozadovanem miste. uGUIEquipShortcut proto nyni
+    NEMENIT a drive neovereny shortcut live test nepouzivat.
+  - Native Campaign inventory je umisteny prijatelne zhruba uprostred
+    viewportu, ale je prilis maly.
+  - Item preview sprites maji znovu chybnou pozici i velikost a presahuji do
+    viewportu druheho hrace. Nestaci clipping; je nutny vcerejsi obecny
+    prepocet celeho mDrawArea (pozice i rozmery) pro vsechny predmety.
+
+Cil inventare: zachovat dnesni umisteni a funkcni Quick Menu, zvetsit panel
+uniformne podle sirky viewportu, nejvyse na SP velikost, a pri uzkem viewportu
+ho zmensit tak, aby cele overene viditelne bounds zustaly uvnitr. Potvrzena
+politika je min(viewportH/720, viewportW/980, viewportH/650).
+
+Safe -01 blob byl obnoven BITOVE z puvodniho stale state
+C:/Users/miraf/Documents/ChatGPT/RER2/out/runtime/
+inventory-adaptive-live-20260831-01.json, objectHash
+9e2a6ff1553af2c3b2f18ab6b25c0d2dc26553964d10fe0115207d7b4ef626a7.
+Nepouziva aktualni diagnosticky InventoryPreviewLive.asm/-04. Live nastroj byl
+rozsiren o profil Release ASI 8E527E0B... a striktni --template-state guard.
+
+Aktivni vratny state noveho procesu PID40284:
+  out/runtime/inventory-adaptive-release-live-20260901-01.json
+  allocation 0x01930000; desiredScale 0.9795918465; native ratio 1.3061224222;
+  panel draw/update counter po aplikaci 436/436. Preview counter byl pri prvni
+  kontrole 0, protoze currentItem=0; bez vybraneho bezneho predmetu to neni
+  vizualni overeni preview opravy. Uzivatel ma overit standardni inventory,
+  alespon dva ruzne predmety, a znovu Quick Menu. Restore:
+  python tools/test-rerev2-inventory-live.py --pid 40284 --state \
+    out/runtime/inventory-adaptive-release-live-20260901-01.json --mode restore
+
+FINALNE POTVRZENY QUICK MENU + INVENTAR LIVE FIX - 2026-09-01
+------------------------------------------------------------
+Tato sekce je autoritativni a nahrazuje starsi mezizavery vyse, zejmena tvrzeni,
+ze uGUIEquipShortcut se nema menit. Uzivatel vizualne potvrdil konecny vysledek
+pro Player 1 jako spravny; menu fix lze povazovat za dokonceny. Quick Menu a
+Inventory jsou dva obsahy jednoho uGUIInventoryCampaign controlleru prepinane
+Q/E, proto musi po celou dobu pouzivat stejny transform, ne branch podle obsahu
+nebo currentItem.
+
+Aktivni vratny live state pro soucasny proces hry PID40284 / creation
+134327294991237285 je:
+  out/runtime/inventory-adaptive-centered-release-live-20260901-01.json
+  allocation 0x01960000; status applied; confirmed safe objectHash
+  9e2a6ff1553af2c3b2f18ab6b25c0d2dc26553964d10fe0115207d7b4ef626a7.
+Deployed Release ASI SHA256 8E527E0B43F6C7358082AD14C07DB5BD79B336BF7A0DDD657AB121254E9FD592
+tento fix dosud NEOBSAHUJE; jde stale o hooky v pameti. Hru ani bridge kvuli
+tomuto zapisu nerestartovat. Stary PID/state nikdy nereapply na novy proces.
+
+Konecna obecna politika Campaign panelu i vsech item preview:
+  desiredScale = min(viewportH/720, viewportW/980, viewportH/650)
+  - maximalni velikost je SP height scale;
+  - pri uzkem viewportu se cely obsah uniformne zmensi, aby nepresahl overene
+    canonical bounds 980x650;
+  - panel se svisle centruje dynamicky z aktualniho viewport rectu;
+  - stejna dynamicka Y translace se aplikuje na cely opraveny mDrawArea preview,
+    tedy pozici I velikost vsech predmetu, bez item-ID whitelistu;
+  - neexistuje pevny offset pro 1920x1080 a reseni je odvozeno z live viewportu.
+
+Samostatny uGUIEquipShortcut (vtable139AFB0, update slot139AFD4, native8E53F0)
+po native update pouziva stejny adaptive desiredScale. Nesmí dostat Campaign
+draw-centering term. Jeho canonical local Y je finalne 215.0; wrapper validuje
+MP, player0/1, class vtable, owner backlink, native canonical root340,280/scale1
+a posune matice 21 vlastnenych node o jeden spolecny delta-Y tak, aby root matrix
+dosahla targetY=215*desiredScale. Absolutni target brani akumulaci posunu mezi
+framy a dynamicky class/layout guard prezije recreate controlleru. Tato lokalni
+oprava zachovava spravnou velikost a polohu ikony zbrane, ammo a hotkey krizku.
+
+Reprodukovatelny nastroj obsahujici konecnou logiku:
+  tools/test-rerev2-inventory-live.py
+Soucasny stav lze bezpečně pouze zkontrolovat:
+  python tools/test-rerev2-inventory-live.py --pid 40284 --state \
+    out/runtime/inventory-adaptive-centered-release-live-20260901-01.json \
+    --mode inspect
+Obnova soucasneho procesu (jen kdyz je opravdu nutna):
+  python tools/test-rerev2-inventory-live.py --pid 40284 --state \
+    out/runtime/inventory-adaptive-centered-release-live-20260901-01.json \
+    --mode restore
+
+Obnova fixu v novem procesu musi vzdy pouzit novy PID, novy volny state path a
+cerstve nalezeny aktivni uGUIEquipShortcut controller. Potvrzeny blob muze byt
+nacten jako template i z tohoto stareho state, protoze nastroj hlida objectHash,
+contentBounds, ASI hash i puvodni instrukce. Obecny tvar prikazu:
+  python tools/test-rerev2-inventory-live.py --pid NEW_PID \
+    --state out/runtime/inventory-adaptive-centered-release-live-NEW.json \
+    --template-state out/runtime/inventory-adaptive-centered-release-live-20260901-01.json \
+    --center-content --shortcut-controller 0xFRESH_CONTROLLER --shortcut-y 215 \
+    --mode apply
+Pred apply musi scan potvrdit aktivni canonical Shortcut root; nepouzivat starou
+heap adresu. Po apply zkontrolovat counters panelDraws/panelUpdates,
+previewCorrections/centeredPreviews a shortcutUpdates a provest vizualni test.
+
+Player 1 finalne potvrzen: Quick Menu, hotkey ikona, Inventory, vyska panelu a
+item preview jsou spravne. Player 2 ma stejnou dynamickou class/player/viewport
+logiku, ale vizualni potvrzeni jeho menu nebylo mozne; Back je na fake gamepadu
+jiz mapovan na Backspace, F8 prepina aktivni virtualni pad a F2 demo neposila
+tlacitka. Pred trvalym portem je vhodne P2 menu overit, ale menu live fix se na
+zadost uzivatele povazuje za uzavreny.
+
+Pred produkcnim buildem neprebirat diagnosticky InventoryPreviewLive.asm/-04.
+Do source je nutne portovat prave safe -01 transform, dynamicke Campaign
+centrovani, generic preview translaci a finalni dynamicky Shortcut matrix fix.
+
+FINALNE POTVRZENY PARTNER COMMAND NEAR/FAR FIX - 2026-09-01
+----------------------------------------------------------
+Uzivatel vizualne potvrdil vodorovne chovani partner-command indikatoru pro
+oba hrace. Tlacitko, ktere v SP prepina postavu, v co-opu zapina dve oddelene
+GUI casti: uGUICommandNear sleduje hlavu partnera na obraze a uGUICommandFar
+zobrazuje sipku, ikonu a vzdalenost po prechodu partnera mimo obraz. Horizontalni
+Near -> Far prechod i navrat funguje pro P1 i P2. Svisly rozsah CommandFar neni
+finalne doladen a je vedome odlozen na pozdeji; horizontalni fix nemenit.
+
+Deployed Release ASI SHA256 8E527E0B43F6C7358082AD14C07DB5BD79B336BF7A0DDD657AB121254E9FD592
+tyto opravy dosud NEOBSAHUJE. Jde o dva aktivni, vratne live states procesu
+PID40284 / creation134327294991237285. Stare heap adresy/allocation/state nikdy
+nepouzivat na novy proces.
+
+CommandFar - potvrzeny finalni horizontalni live state:
+  out/runtime/command-far-viewport-draw-live-20260901-01.json
+  allocation0x01DD0000; status applied; correctionCalls rostou.
+  tools/test-rerev2-command-far-live.py
+Oprava ma tri nutne casti:
+  1. draw slot139AB98 je v MP smerovan z legacy OFFSET wrapperu58C53190 na
+     normalni core transform58C525C0, aby pouzil pocatek vlastniho viewportu;
+  2. MP canonical root center immediate na8E2A13 je800.0 ->640.0, coz pri
+     native height scale0.75 dava stred P1 viewportu x480;
+  3. call8E323F na native timeline E68DF0 je obalen MP/class/player guardem.
+     Po nativni animaci se musi opravit OBE reprezentace horizontalni polohy:
+     source translation prvniho animovaneho child na +0x80 A finalni matrix X
+     vsech sesti Far child na +0x40. Opravit jen matrix nestaci - kresba dal
+     plynule vyjede ven podle source translation. Root animation slot0 poskytuje
+     dynamicky parent matrix center/scale; target se omezuje na controller cached
+     viewport rect plus/minus nativni safe margin z globalu14DD080 (=40).
+     Scale, tvar ikony, text, uhel, opacity a timing zustavaji beze zmeny.
+Pri 1920x1080 side-by-side byl draw rozsah overen presne x40..920 v lokalnim
+viewportu0..960. Uzivatel potvrdil, ze doleva/doprava je pohyb presny a blok
+nevypadava. Rezerva obrazku za kotevnim bodem je prakticky nulova, ale uzivatel
+to akceptoval. Reseni cte viewport a parent scale za behu, neni to pixelovy
+offset stredu zavisly na rozliseni.
+Inspect:
+  python tools/test-rerev2-command-far-live.py --pid 40284 --state \
+    out/runtime/command-far-viewport-draw-live-20260901-01.json --mode inspect
+Restore (jen soucasny proces, pokud je nutny rollback):
+  python tools/test-rerev2-command-far-live.py --pid 40284 --state \
+    out/runtime/command-far-viewport-draw-live-20260901-01.json --mode restore
+
+CommandNear - potvrzeny finalni P1/P2 horizontalni live state:
+  out/runtime/command-indicator-viewport-clamp-live-20260901-01.json
+  update wrapper allocation0x3D370000; status applied; localizationCalls rostou.
+  tools/test-rerev2-command-indicator-live.py
+Native Near projection8E36A0 ma volitelny clamp rizeny controller+0x2F8 a nativni
+safe margin40. Pozor: vysledek projekce i GUI draw jsou viewport-LOCAL. Fyzicky
+viewport P1 je0..960, takze jeho fyzicky clamp je shodou okolnosti soucasne
+lokalni a funguje. U P1 zustava +0x2F8=1.
+
+U P2 je fyzicky viewport960..1920, ale raw projekce je lokalni0..960. Zapnout
+nativni flag u P2 je CHYBA: vsechny platne x pripne na fyzicke minimum1000 a
+po pokusu o odecteni originu zustane ikona stale na lokalnim x40, navazana na
+kameru misto Claire. Finalne proto P2 +0x2F8=0. Vtable update slot139ACC4 je
+obalen wrapperem, ktery nejprve vola puvodni update8E34F0; jen v MP, jen pro
+uGUICommandNear player1 a jen pri flagu0 pak omezi controller position +0x40/
++0x44 primo na jeho cached LOCAL rect +0x168..+0x174 s native margin40.
+P1 wrapper preskoci a pouzije native clamp. Zadny pocatek960 se neodcita.
+Uzivatel potvrdil, ze P2 Near znovu sedi Claire nad hlavou, horizontalne ji
+sleduje, funguje na obou krajich a korektne se prepina na potvrzeny Far blok.
+Inspect:
+  python tools/test-rerev2-command-indicator-live.py --pid 40284 --state \
+    out/runtime/command-indicator-viewport-clamp-live-20260901-01.json --mode inspect
+Restore (jen soucasny proces, pokud je nutny rollback):
+  python tools/test-rerev2-command-indicator-live.py --pid 40284 --state \
+    out/runtime/command-indicator-viewport-clamp-live-20260901-01.json --mode restore
+
+Diagnosticke profily, ktere rozlisily source translation, final matrix a draw:
+  tools/profile-rerev2-command-far-animation.py
+  tools/profile-rerev2-command-far-draw.py
+  out/diagnostics/profile-command-far-draw-p1-right-after-source-clamp-20260901-01.json
+  out/diagnostics/profile-gui-core-command-near-p2-missing-20260901-01.json
+  out/diagnostics/profile-gui-core-command-near-p2-local-clamp-20260901-01.json
+
+Pred produkcnim portem zachovat oddelene class-specific guards, split-screen
+gate, player rozliseni a restore originalnich vtable/code bytes. Kompilace sama
+nestaci; po portu znovu herne overit P1 i P2 Near/Far a vertikalni Far odklad.
+
+ROZPRACOVANY TAB -> PARTNER COMMAND INPUT FIX - 2026-09-01
+---------------------------------------------------------
+Cil: v aktivnim local co-opu ma klavesnicovy Tab pro P1 zobrazit stejnou
+uGUICommandNear/uGUICommandFar navigaci jako gamepad Y. V SP musi zustat nativni
+ChangeCharacter a nesmi se menit RMB ani vlastnictvi klavesnice/mysi.
+
+Potvrzena konfigurace:
+  config.ini ChangeCharacter=2 odpovida Tabu; hra nema samostatny keyboard
+  PartnerCommand zaznam. Ordered action index ChangeCharacter je 0x29.
+  Bridge data mapuje Y=Q; pri spravne vybranem fake gamepadu lze ciste Y testy
+  automatizovat pres tools/send-key-taps.py s VK_Q 0x51.
+
+Potvrzeny nativni Y tok:
+  XINPUT1_3!XInputGetState z calleru rerev2.exe+0x814B06, index0, fyzicky
+  XINPUT_GAMEPAD_Y=0x8000. sub_C11E20 jej na C11EA3/C11EAA preklada do interniho
+  gameplay bitu0x1000. C14E80 aktualizuje current/pressed/released stav.
+  Cisty desetistisk dal presne10 rising a10 falling hran. A18690 dostal10 rising
+  hran bitu0x1000 pro P1 actor0x2A110060/id0.
+
+Vyvracene hypotezy a bezpecne rollbacky stareho PID40284:
+  1. A186FF alias na drive odhadnutou gamepad vetev byl spatne; marker neaktivoval
+     a rozbil RMB. State partner-command-tab-live-20260901-01 je restored.
+  2. Globalni one-frame0x1000 pulse na common dispatcheru A16C6F marker
+     neaktivoval. State partner-command-tab-mask-live-20260901-01 je restored.
+  3. Lokalni keyboard continuation ChangeCharacter handleru A16F90/A17038 se v
+     MP vubec nevykonava. State partner-command-tab-handler-live-20260901-01 je
+     restored. Tab edge counter rostl, ale marker nevznikl.
+  4. Drive oznacena partner eligibility 701770 se pri skutecnem gamepad Y
+     nezavolala ani jednou; nepouzivat ji jako dukaz partner-command cesty.
+  5. A18840 nebyl Y consumer. Jeho predbezna true navratova hodnota byla mylne
+     interpretovana; ve funkci neni primy test0x1000.
+
+Read-only diagnostika:
+  profile-rerev2-y-frame-stalker.py porovnal input-thread intervaly. Jedine
+  Y-only bloky byly C11EAA a C14EA2/C14EC5/C14ED4, tedy preklad a casovani inputu;
+  gameplay/UI spotreba probiha na jinem threadu.
+  profile-rerev2-command-object-y.py nenasel prosty trvaly activation byte primo
+  v CommandNear/Far objektech; menily se hlavne animacni casy.
+  profile-rerev2-command-vtable-y.py nenasel jednorazovy Y-specific vtable setter;
+  controllery se aktualizuji per-frame.
+
+DULEZITE: hromadne pripojeni Frida Interceptor k122 libovolnym instrukcnim
+adresam test/cmp/and0x1000 zpusobilo 2026-09-01 16:20 pad rerev2.exe c0000005/
+BEX (execution at invalid address). Nebezpecny profiler byl ihned odstranen.
+Neopakovat hromadne instruction-level Interceptor hooky; nektere instrukce
+nelze bezpecne relokovat. Pouzivat statickou analyzu nebo nejvyse jeden predem
+overeny function-entry/callsite hook s rollbackem.
+
+Pad ukoncil proces PID40284. Bridge PID49104 v okamziku zapisu dale bezel.
+Vsechny out/runtime live-state soubory PID40284 jsou od teto chvile pouze
+historicke reference/templates; jejich heap adresy a alokace nikdy neaplikovat
+na novy proces. Po novem startu je nutne znovu dohledat controllery a vytvorit
+fresh live states pro Inventory/Shortcut, CommandNear a CommandFar. Deployed ASI
+hash8E527E... tyto posledni live menu/partner viewport opravy stale neobsahuje.
+
+Dalsi bezpecny smer: staticky rozebrat prime spotrebitele interniho bitu0x1000
+v gameplay kodu a dynamicky potvrdit jen jednoho kandidata cistym Y. Teprve pak
+lokalne syntetizovat Tab v MP vetvi; SP ChangeCharacter nechat nedotceny.
+
+FINALNE POTVRZENY TAB A PRODUKCNI PORT - 2026-09-01
+--------------------------------------------------
+Tato sekce nahrazuje rozpracovany zaver vyse. Na novem procesu PID22248 byla
+finalne herne potvrzena bezpecna P1-only varianta Tab -> partner command:
+  - pripojeni pouze na CELE entry Near projekce8E36A0 a Far update8E29E0;
+  - zadny hook uvnitr8E36A0 ani hromadne instruction-level Interceptory;
+  - pouze pri aktivnim splitMode1/splitState1, player0 a VK_TAB;
+  - drzeny Tab prodluzuje deadline o3000ms a behem nej se Near nejprve necha
+    kompletne prepocitat; podle finalni pozice v aktualnim viewportu+margin40
+    se zachova Near, nebo se potlaci a po nativnim Far update zapne Far;
+  - P2, XInput, mouse/RMB a SP nejsou zmeneny.
+Uzivatel potvrdil: P1 Near na obraze, Far mimo obraz, dynamicky Near<->Far,
+automaticke zmizeni po nekolika sekundach, plynuly pohyb a spravne RMB. Potom
+bridge ukoncil, vratil se do SP a potvrdil i nativni Tab ChangeCharacter.
+Havarujici interni hook8E3B01 se nesmi nikdy znovu pouzit.
+
+Fresh potvrzene live states procesu PID22248:
+  out/runtime/inventory-adaptive-centered-release-live-pid22248-20260901-01.json
+  allocation0x03830000, objectHash9e2a6ff1553af2c3b2f18ab6b25c0d2dc26553964d10fe0115207d7b4ef626a7
+  out/runtime/command-far-viewport-draw-live-pid22248-20260901-01.json
+  out/runtime/command-indicator-viewport-clamp-live-pid22248-20260901-01.json
+Tyto adresy jsou historicke; v novem procesu se nikdy znovu nepouzivaji.
+
+Produkcni source port je oddelen v:
+  source/ResidentEvilRevelations2.FusionFix/CoopMenuNativeCode.h
+  source/ResidentEvilRevelations2.FusionFix/CoopMenuRuntime.h
+Inventory pouziva presne potvrzeny safe -01 blob a byte-for-byte shodne draw,
+preview a Shortcut wrappery. CommandFar pouziva potvrzeny viewport-relative
+animation wrapper. CommandNear produkcne nahrazuje jen jeho vtable update a
+zachovava nativni poradi generic update9690F0 -> projection8E36A0; tim lze pred
+projekci dynamicky nastavit P1/P2 clamp flag, po projekci lokalizovat P2 a bez
+Fridy provest stejnou P1 Tab Near/Far volbu. V neaktivnim splitu se vola puvodni
+update8E34F0 a flag se vraci na0, proto zustava SP nativni.
+
+INI rollback prepinace (default1, vyzaduji restart):
+  COOP.AdaptiveInventory
+  COOP.PartnerCommandViewport
+  COOP.KeyboardPartnerCommand
+Existujici COOP.ViewportHud a COOP.NativeKeyboardMousePlayer1 zustavaji
+oddeleny. tools/inspect-rerev2-permanent.py provadi pouze read-only kontrolu,
+ze produkcni hooky prosly guardy.
+
+Offline produkcni test tools/test-rerev2-coop-permanent.ps1: 10/10 OK.
+Release ASI build SHA256:
+  391E7ABF8F2D80480DD647471575FB8CE5DBA38E9BB350F89BE304761978F2FE
+Nasazeno se zalohou predchozi ASI. Cisty proces PID40668 / creation
+134327584640953365 bez Fridy potvrdil instalaci vsech hooku read-only:
+Inventory allocation0x07A40000, CommandFar allocation0x07A50000,
+Far center640, Near/Far vtable production wrappers. V okamziku zapisu ceka na
+finalni vizualni restartovy test v co-opu.
+
+FINALNI RESTARTOVY TEST POTVRZEN UZIVATELEM:
+  "ve hre vse vypada OK"
+Potvrzeni se tyka produkcni ASI bez Fridy po cistem startu hry a zahrnuje
+dosavadni celkovy testovany stav. Nasledujici rebuild muze menit pouze embedded
+Git SHA/verzi/update URL; herni hook logika musi zustat beze zmeny.

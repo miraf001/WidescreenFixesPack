@@ -1,0 +1,24 @@
+name: RE Rev2 build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Offline co-op tests
+        shell: pwsh
+        run: ./tools/test-rerev2-coop-permanent.ps1
+      - name: Build Release ASI
+        shell: pwsh
+        run: ./tools/build.ps1 -Configuration Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ResidentEvilRevelations2-FusionFix
+          path: out/packages/rerev2/release/**

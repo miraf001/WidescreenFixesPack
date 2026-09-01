@@ -1,111 +1,83 @@
-<div align="center">
+# Resident Evil Revelations 2 FusionFix
 
-[![wfp](https://raw.githubusercontent.com/ThirteenAG/thirteenag.github.io/master/img/logo2-bl.svg)](https://fusionfix.io/wfp)
+This is a focused fork of
+[ThirteenAG/WidescreenFixesPack](https://github.com/ThirteenAG/WidescreenFixesPack)
+for the Windows version of **Resident Evil Revelations 2**. Other game targets
+have been removed so the repository, build and releases describe this title
+only.
 
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/ThirteenAG/WidescreenFixesPack/main.yml?branch=master&label=GitHub%20Actions%20Build&logo=GitHub)](https://github.com/ThirteenAG/WidescreenFixesPack/actions/workflows/main.yml)
-[![AppVeyor](https://img.shields.io/appveyor/build/ThirteenAG/WidescreenFixesPack?label=AppVeyor%20Build&logo=Appveyor&logoColor=white)](https://ci.appveyor.com/project/ThirteenAG/widescreenfixespack)
-[![Azure DevOps builds](https://img.shields.io/azure-devops/build/ThirteenAG/f555b128-da05-4bad-a972-90d529123a2e/3?label=Azure%20Pipelines%20Build&logo=Azure%20Pipelines)](https://dev.azure.com/thirteenag/WidescreenFixesPack/_build/latest?definitionId=3&branchName=master)
+The fork keeps the original widescreen fixes and adds local co-op corrections
+developed and tested against the current Steam executable.
 
-[![GitHub license](https://img.shields.io/github/license/ThirteenAG/WidescreenFixesPack?color=blue)](https://github.com/ThirteenAG/WidescreenFixesPack/blob/master/license)
-[![GitHub stars](https://img.shields.io/github/stars/ThirteenAG/WidescreenFixesPack?style=flat&color=blue)](https://github.com/ThirteenAG/WidescreenFixesPack/stargazers)
-[![Commits](https://img.shields.io/github/commit-activity/m/ThirteenAG/WidescreenFixesPack?label=commits)](https://github.com/ThirteenAG/WidescreenFixesPack/commits)
-[![GitHub last commit](https://img.shields.io/github/last-commit/ThirteenAG/WidescreenFixesPack?color=blue)](https://github.com/ThirteenAG/WidescreenFixesPack/commits)
+## Co-op fixes
 
-[![Platforms](https://img.shields.io/badge/platforms:-grey)](https://github.com/ThirteenAG/WidescreenFixesPack/releases)
-[![WINDOWS](https://img.shields.io/badge/WINDOWS-0078D4)](https://github.com/ThirteenAG/WidescreenFixesPack/releases?q=NOT+CXBXR+NOT+PCSX2F+NOT+PPSSPP&expanded=true)
-[![PCSX2F](https://img.shields.io/badge/PCSX2F-0271A6)](https://github.com/ThirteenAG/WidescreenFixesPack/releases?q=PCSX2F&expanded=true)
-[![PPSSPP](https://img.shields.io/badge/PPSSPP-33b5e5)](https://github.com/ThirteenAG/WidescreenFixesPack/releases?q=PPSSPP&expanded=true)
-[![CXBXR](https://img.shields.io/badge/CXBXR-96CE49)](https://github.com/ThirteenAG/WidescreenFixesPack/releases?q=CXBXR&expanded=true)
-[![DOLPHIN](https://img.shields.io/badge/DOLPHIN-30b5ff)](https://github.com/ThirteenAG/WidescreenFixesPack/releases?q=DOLPHIN&expanded=true)
+- Native keyboard and mouse ownership for player 1 while player 2 remains on a
+  gamepad, coordinated with the optional virtual-gamepad bridge.
+- Viewport-local ammo, herbs, flashlight and base reticle HUD using the
+  single-player proportions.
+- Crosshair size and center derived from the owning player's current viewport.
+- Adaptive Campaign Inventory and Quick Menu: uniform scaling up to the
+  single-player size, shrinking only when the verified content bounds would not
+  fit the viewport.
+- Correct item preview position and size for both player viewports.
+- Correct Quick Menu hotkey assignment block position and scale.
+- Viewport-local partner CommandNear and CommandFar indicators for both players.
+- Player 1 keyboard `Tab` shows the partner indicator in co-op for about three
+  seconds while preserving native character switching in single-player.
 
-[![Downloads](https://img.shields.io/github/downloads/ThirteenAG/WidescreenFixesPack/total?color=red)](https://github.com/ThirteenAG/WidescreenFixesPack/releases/)
+All co-op transforms read the live viewport dimensions. They are not fixed
+offsets for one resolution and are designed to work at 16:9 and wider desktop
+layouts.
 
-https://fusionfix.io/wfp
+## Install
 
-<p align="center">
-  <a href="https://patreon.fusionfix.io/" target="_blank"><picture><source media="(max-width: 768px) and (prefers-color-scheme: dark)" srcset="https://fusionlegacyinitiative.com/sponsors-progress/sponsors-progress-wfp-mobile-dark.svg"><source media="(max-width: 768px)" srcset="https://fusionlegacyinitiative.com/sponsors-progress/sponsors-progress-wfp-mobile.svg"><source media="(prefers-color-scheme: dark)" srcset="https://fusionlegacyinitiative.com/sponsors-progress/sponsors-progress-wfp-dark.svg"><img width="100%" src="https://fusionlegacyinitiative.com/sponsors-progress/sponsors-progress-wfp.svg"></picture></a>
-  <br />
-  <a href="https://github.com/sponsors/ThirteenAG"><picture><source media="(prefers-color-scheme: dark)" srcset="https://thirteenag.github.io/img/buttons/github-dark.svg"><img src="https://thirteenag.github.io/img/buttons/github.svg" width="250"></picture></a>
-  <a href="https://ko-fi.com/thirteenag"><picture><source media="(prefers-color-scheme: dark)" srcset="https://thirteenag.github.io/img/buttons/kofi-dark.svg"><img src="https://thirteenag.github.io/img/buttons/kofi.svg" width="250"></picture></a>
-  <a href="https://paypal.me/SergeyP13"><picture><source media="(prefers-color-scheme: dark)" srcset="https://thirteenag.github.io/img/buttons/paypal-dark.svg"><img src="https://thirteenag.github.io/img/buttons/paypal.svg" width="250"></picture></a>
-  <a href="https://www.patreon.com/ThirteenAG"><picture><source media="(prefers-color-scheme: dark)" srcset="https://thirteenag.github.io/img/buttons/patreon-dark.svg"><img src="https://thirteenag.github.io/img/buttons/patreon.svg" width="250"></picture></a>
-  <a href="https://boosty.to/thirteenag"><picture><source media="(prefers-color-scheme: dark)" srcset="https://thirteenag.github.io/img/buttons/boosty-dark.svg"><img src="https://thirteenag.github.io/img/buttons/boosty.svg" width="250"></picture></a><br><br>
-  <a href="https://discord.gg/2ckFCS572Z" target="_blank"><img width="200" src="https://raw.githubusercontent.com/ThirteenAG/GTAIV.EFLC.FusionFix/refs/heads/master/installer/discord.svg"></a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://t.me/fusionfix" target="_blank"><img width="200" src="https://raw.githubusercontent.com/ThirteenAG/GTAIV.EFLC.FusionFix/refs/heads/master/installer/telegram.svg"></a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://www.youtube.com/@FusionFix10" target="_blank"><img width="200" src="https://raw.githubusercontent.com/ThirteenAG/GTAIV.EFLC.FusionFix/refs/heads/master/installer/youtube.svg"></a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://x.com/fusionfix10" target="_blank"><img width="200" src="https://raw.githubusercontent.com/ThirteenAG/GTAIV.EFLC.FusionFix/refs/heads/master/installer/x.svg"></a>
-  &nbsp;&nbsp;&nbsp;
-</p>
+1. Download the latest release archive.
+2. Copy its contents to the Resident Evil Revelations 2 game directory.
+3. Keep an ASI loader installed (the release contains the same loader marker
+   convention used by WidescreenFixesPack).
+4. Review `scripts/ResidentEvilRevelations2.FusionFix.ini` and restart the game
+   after changing any `[COOP]` option.
 
-Plugins to make or improve widescreen resolutions support in PC games, add more features and fix bugs.
-</div>
+The defaults enable the confirmed co-op fixes. Each major group has a separate
+INI rollback switch:
 
-# Building and Installing
+```ini
+[COOP]
+ViewportHud = 1
+NativeKeyboardMousePlayer1 = 1
+AdaptiveInventory = 1
+PartnerCommandViewport = 1
+KeyboardPartnerCommand = 1
+```
 
-Requirements:
+The optional keyboard-to-gamepad bridge is documented in
+[DEVELOPMENT.md](DEVELOPMENT.md). Its hotkeys include F8 to select the virtual
+pad, F9 to release/capture input and Backspace for the emulated Back button.
 
-- [Premake 5](https://premake.github.io/) _(pre-built executable available in this repository root)_
-- [Visual Studio](http://www.visualstudio.com/downloads)
+## Build and test
 
-Run the following command in the root of this directory to generate the project files (or simply launch **premake5.bat**):
+Requirements: Windows, Git with submodules, Visual Studio C++ x86 build tools,
+CMake and Python 3.
 
-    premake5 vs2022
+```powershell
+git submodule update --init --recursive
+powershell -ExecutionPolicy Bypass -File tools/test-rerev2-coop-permanent.ps1
+powershell -ExecutionPolicy Bypass -File tools/build.ps1 -Configuration Release
+```
 
-The usage is as simple as inserting the files into game's root directory. Uninstalling is as easy as that too, delete the files and you are done.
+The package is written to `out/packages/rerev2/release`. A successful compile
+is static verification only; GUI and input changes must also pass an in-game
+single-player and local co-op test.
 
-# How to Report Crashes
+## Development history
 
-If the game crashes while using the fixes, please send the **crash dump** (.dmp file).
+- [DEVELOPMENT.md](DEVELOPMENT.md) describes the focused workflow and tests.
+- [REREV2_RENDERING_NOTES.txt](REREV2_RENDERING_NOTES.txt) is the recovery log
+  for the reverse-engineered rendering, inventory, input and partner-command
+  behavior.
 
-#### ⚙️ Easiest way (Recommended)
+## Credits and license
 
-Plugins usually come with an [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) that is capable of generating crash dumps and crash logs.
-
-1. Go to your game's main folder (where the game's `.exe` file is located).
-2. In the same folder, create a new folder and name it exactly:
-   **`CrashDumps`**
-
-**After the game crashes:**
-- Open the **CrashDumps** folder you created.
-- Look for the newest file with the `.dmp` extension (this is the most important file).
-- You may also include the `.log` file if it exists, but the **.dmp file is required**.
-
-Please send the `.dmp` file when reporting the crash.
-
-You can report it here:
-- [GitHub Issues](https://github.com/ThirteenAG/WidescreenFixesPack/issues)
-
-#### ⚙️ Alternative way (Windows built-in crash dumps)
-
-Use this method only if the previous method doesn't create a dump.
-
-1. Press **Windows key + R**, type `regedit`, and press Enter.
-2. Navigate to this path:  
-   `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting`
-3. Right-click inside the **Windows Error Reporting** folder → **New** → **Key**, and name it exactly: **`LocalDumps`**
-4. Close Registry Editor.
-
-After a crash, the dump file will be saved here:  
-`C:\Users\YOURUSERNAME\AppData\Local\CrashDumps`
-
-Find the newest `.dmp` file related to your game and send it in [GitHub Issues](https://github.com/ThirteenAG/WidescreenFixesPack/issues).
-
-**Warning:** This method requires administrator rights and enables crash dumps for all programs on your computer.
-
-#### ⚙️ If the game **hangs or freezes** (instead of crashing)
-
-1. Press **Ctrl + Shift + Esc** to open Task Manager.
-2. Find the game process in the list (usually the name of the game's `.exe`).
-3. Right-click on it and select **Create memory dump file**.
-
-**Warning:** This file will be quite large (hundreds of MB or more).
-
-Upload the `.dmp` file to Google Drive, OneDrive, Dropbox, or any similar service **and make sure the link is set to public access**. Then share the link when reporting in [GitHub Issues](https://github.com/ThirteenAG/WidescreenFixesPack/issues).
-
-# Important notes
-
-- Not compatible with Windows XP (without recompiling with `_xp` toolset and `/Zc:threadSafeInit-`).
-- For using with WINE, follow [this guide](https://silentsblog.com/setup-instructions/#proton-wine).
+Based on WidescreenFixesPack by ThirteenAG and its contributors. The focused
+RE:Rev2 co-op work was developed with miraf001. See [license](license) for the
+upstream MIT license.

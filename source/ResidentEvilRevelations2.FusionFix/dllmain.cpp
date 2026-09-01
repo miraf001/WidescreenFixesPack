@@ -1,8 +1,9 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "LEDEffects.h"
 #include <d3d9.h>
 #include <d3dx9.h>
 #pragma comment(lib, "d3dx9.lib")
+#include <cstring>
 #include <vector>
 #include <xinput.h>
 
@@ -10,6 +11,22 @@ constexpr auto defaultAspectRatio = 16.0f / 9.0f;
 float fFOVFactor = 1.0f;
 int32_t ResX = 0;
 int32_t ResY = 0;
+float fHudOffsetX = 0.0f;
+float fHudOffsetY = 0.0f;
+float fHudScaleX = 1.0f;
+float fHudScaleY = 1.0f;
+float fSubtitleOffsetX = 0.0f;
+float fSubtitleOffsetY = 0.0f;
+float fSubtitleScaleX = 1.0f;
+float fSubtitleScaleY = 1.0f;
+float fSubtitleLeftOffsetX = -0.25f;
+float fSubtitleRightOffsetX = 0.25f;
+bool bSubtitlePerPlayer = true;
+
+#if _DEBUG
+alignas(8) volatile LONG64 gSubtitleTransformCalls = 0;
+alignas(8) volatile LONG64 gSubtitleLastPeriodicLogTick = 0;
+#endif
 
 enum GUI
 {
@@ -150,6 +167,55 @@ enum GUI
 static IDirect3DVertexShader9* g_screenVertexShader = nullptr;
 static IDirect3DPixelShader9* g_wmvYuvDecodePixelShader = nullptr;
 static IDirect3DVertexShader9* g_myScreenVertexShader = nullptr;
+static thread_local float gSubtitlePassTranslationXNdc = 0.0f;
+static thread_local float gSubtitlePassOffsetX = 0.0f;
+
+void LoadHudTuningFromIni()
+{
+    CIniReader iniReader("");
+    fHudOffsetX = iniReader.ReadFloat("HUD", "OffsetX", 0.0f);
+    fHudOffsetY = iniReader.ReadFloat("HUD", "OffsetY", 0.0f);
+    fHudScaleX = iniReader.ReadFloat("HUD", "ScaleX", 1.0f);
+    fHudScaleY = iniReader.ReadFloat("HUD", "ScaleY", 1.0f);
+    fSubtitleOffsetX = iniReader.ReadFloat("SUBTITLES", "OffsetX", 0.0f);
+    fSubtitleOffsetY = iniReader.ReadFloat("SUBTITLES", "OffsetY", 0.0f);
+    fSubtitleScaleX = iniReader.ReadFloat("SUBTITLES", "ScaleX", 1.0f);
+    fSubtitleScaleY = iniReader.ReadFloat("SUBTITLES", "ScaleY", 1.0f);
+    fSubtitleLeftOffsetX =
+        iniReader.ReadFloat("SUBTITLES", "LeftOffsetX", -0.25f);
+    fSubtitleRightOffsetX =
+        iniReader.ReadFloat("SUBTITLES", "RightOffsetX", 0.25f);
+    bSubtitlePerPlayer =
+        iniReader.ReadInteger("SUBTITLES", "PerPlayer", 1) != 0;
+    DBGONLY(spd::log()->info(
+        "[TUNING] HUD offset=({}, {}) scale=({}, {}); subtitles "
+        "perPlayer={} offset=({}, {}) playerX=({}, {}) scale=({}, {})",
+        fHudOffsetX, fHudOffsetY, fHudScaleX, fHudScaleY,
+        bSubtitlePerPlayer,
+        fSubtitleOffsetX, fSubtitleOffsetY,
+        fSubtitleLeftOffsetX, fSubtitleRightOffsetX,
+        fSubtitleScaleX, fSubtitleScaleY);)
+}
+
+namespace rev2coop { inline void PollBridgeCapture(); }
+
+DWORD WINAPI IniHotkeyThread(LPVOID)
+{
+    while (true)
+    {
+        // If F5 is pressed
+        if (GetAsyncKeyState(VK_F5) & 1)
+        {
+            LoadHudTuningFromIni();
+            OutputDebugStringA("[HUD] Reloaded values from INI via F5\n");
+        }
+
+        rev2coop::PollBridgeCapture();
+        Sleep(20); // Bridge F9 synchronization stays off the game/render thread.
+    }
+
+    return 0;
+}
 
 bool IsSplitScreenActive()
 {
@@ -371,34 +437,102 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
         {
             if (IsSplitScreenActive())
             {
-                if (v21 == GetCurrentSplitScreenResY() || v21 == (GetCurrentSplitScreenResY() + 1))
+                const float screenWidth = (float)(v28 - v19);
+                const float screenHeight = (float)(v21 - v29);
+                const auto splitWidth = GetCurrentSplitScreenResX();
+                const bool isLeftViewportOrigin = v19 == 0 || v19 == 1;
+                const bool isRightViewportOrigin =
+                    v19 == splitWidth || v19 == splitWidth + 1;
+                const auto viewportWidth = v28 - v19;
+                const bool isOneViewportWide =
+                    viewportWidth >= splitWidth - 1 &&
+                    viewportWidth <= splitWidth + 1;
+                const bool isSplitViewport = isOneViewportWide &&
+                    (isLeftViewportOrigin || isRightViewportOrigin);
+                const bool isSubtitles = edx == SUBTITLES;
+
+                // Full-screen GUI such as the pause-menu overlay also starts
+                // at X=0. Its full-canvas width distinguishes it from player
+                // one's HUD viewport. Leave those elements on the canonical
+                // transform initialized above; only actual half-width HUD
+                // viewports receive the split-screen HUD correction.
+                if (isSubtitles || isSplitViewport)
                 {
                     v14 = 2.0f / (float)(v28 - v19);
                     v15 = -2.0f / (float)(v21 - v29);
-                    v13[0] = v14 * v4 * ((edx == SUBTITLES) ? (1.0f / GetDiff()) : 1.0f);
-                    v13[1] = v15 * v5;
-                    v13[2] = (float)(v14 * v6) - (1.0f / GetDiff());
-                    v13[3] = (float)(v15 * v7) + 1.0f;
-                }
-                else if (v21 == GetResY())
-                {
-                    v14 = 2.0f / (float)(v28 - v19);
-                    v15 = -2.0f / (float)(v21 - v29);
-                    v13[0] = v14 * v4 * ((edx == SUBTITLES) ? (1.0f / GetDiff()) : 1.0f);
-                    v13[1] = v15 * v5;
-                    v13[2] = (float)(v14 * v6) - (1.0f / (GetAspectRatio() / defaultAspectRatio));
-                    v13[3] = (float)(v15 * v7) + 1.0f;
+
+                    if (isSubtitles)
+                    {
+                        const float aspectFix = 1.0f / GetDiff();
+                        const float offsetX = screenWidth *
+                            (fSubtitleOffsetX + gSubtitlePassOffsetX);
+                        const float offsetY = screenHeight * fSubtitleOffsetY;
+                        v13[0] = v14 * v4 * aspectFix * fSubtitleScaleX;
+                        v13[1] = v15 * v5 * fSubtitleScaleY;
+                        v13[2] = (v14 * (v6 + offsetX)) - aspectFix +
+                            gSubtitlePassTranslationXNdc;
+                        v13[3] = (v15 * (v7 + offsetY)) + 1.0f;
+                    }
+                    else
+                    {
+                        constexpr float baseOffsetXFactor = -0.0f;
+                        constexpr float baseOffsetYFactor = 0.25f;
+                        constexpr float baseScaleX = 0.8f;
+                        constexpr float baseScaleY = 1.0f;
+                        const float baseOffsetX =
+                            screenWidth * baseOffsetXFactor;
+                        const float baseOffsetY =
+                            screenHeight * baseOffsetYFactor;
+                        const float offsetX = screenWidth * fHudOffsetX;
+                        const float offsetY = screenHeight * fHudOffsetY;
+                        v13[0] = v14 * v4 * baseScaleX * fHudScaleX;
+                        v13[1] = v15 * v5 * baseScaleY * fHudScaleY;
+                        v13[2] = (v14 * (v6 + baseOffsetX + offsetX)) - 1.0f;
+                        v13[3] = (v15 * (v7 + baseOffsetY + offsetY)) + 1.0f;
+                    }
                 }
             }
             else
             {
                 v14 = 2.0f / (float)(v28 - v19);
                 v15 = -2.0f / (float)(v21 - v29);
-                v13[0] = v14 * v4 * ((edx == SUBTITLES) ? (1.0f / GetDiff()) : 1.0f);
+                // Subtitle tuning is intentionally split-screen-only. Preserve
+                // the original single-player transform and placement.
+                v13[0] = v14 * v4;
                 v13[1] = v15 * v5;
                 v13[2] = (float)(v14 * v6) - (1.0f / GetDiff());
                 v13[3] = (float)(v15 * v7) + 1.0f;
             }
+
+            DBGONLY({
+                if (edx == SUBTITLES)
+                {
+                    const bool splitScreenActive = IsSplitScreenActive();
+                    static int singleScreenTraceCount = 0;
+                    static int splitScreenTraceCount = 0;
+                    int& subtitleTraceCount = splitScreenActive ? splitScreenTraceCount : singleScreenTraceCount;
+                    const int subtitleTraceLimit = splitScreenActive ? 64 : 8;
+                    if (subtitleTraceCount++ < subtitleTraceLimit)
+                    {
+                        const char* branch = "unmatched";
+                        if (!splitScreenActive)
+                            branch = "single-screen";
+                        else if ((v28 - v19) > GetCurrentSplitScreenResX() + 1)
+                            branch = "shared-full-canvas";
+                        else if (v19 == 0 || v19 == 1)
+                            branch = "left";
+                        else if (v19 == GetCurrentSplitScreenResX() || v19 == GetCurrentSplitScreenResX() + 1)
+                            branch = "right";
+
+                        spd::log()->info(
+                            "[SUBTITLES] branch={} bounds=({}, {})-({}, {}) split={}x{} screen={}x{} "
+                            "inputScale=({}, {}) inputPos=({}, {}) output=({}, {}, {}, {})",
+                            branch, v19, v29, v28, v21,
+                            GetCurrentSplitScreenResX(), GetCurrentSplitScreenResY(), GetResX(), GetResY(),
+                            v4, v5, v6, v7, v13[0], v13[1], v13[2], v13[3]);
+                    }
+                }
+            });
         }
         break;
         case STRETCH:
@@ -497,12 +631,427 @@ void __fastcall sub_E18040_nop(int _this, int edx, int a2)
     return;
 }
 
+static bool IsTextVoiceController(uintptr_t object)
+{
+    constexpr uintptr_t uGUITextVoiceVtable = uGUITextVoice - 0x58;
+
+    if (!object || IsBadReadPtr((void*)object, sizeof(uintptr_t)))
+        return false;
+
+    return *(uintptr_t*)object == uGUITextVoiceVtable;
+}
+
+static bool IsBioSubtitleController(uintptr_t object)
+{
+    constexpr uintptr_t classNameOffset = 0x1B8;
+
+    if (!object || IsBadReadPtr((void*)object, sizeof(uintptr_t)))
+        return false;
+
+    const auto vtable = *(uintptr_t*)object;
+
+    if (!vtable || IsBadReadPtr((void*)(vtable + classNameOffset), sizeof("uBioGUISubtitles")))
+        return false;
+
+    const auto className = (const char*)(vtable + classNameOffset);
+    return std::memcmp(className, "uBioGUISubtitles", sizeof("uBioGUISubtitles")) == 0;
+}
+
+static bool IsSubtitleController(uintptr_t object)
+{
+    return IsTextVoiceController(object) || IsBioSubtitleController(object);
+}
+
+enum class SubtitleViewportSide
+{
+    Automatic,
+    Left,
+    Right,
+};
+
+static SubtitleViewportSide GetLinkedSubtitleViewportSide(uintptr_t controller)
+{
+    constexpr uintptr_t nextControllerOffset = 0x14;
+    constexpr uintptr_t previousControllerOffset = 0x18;
+
+    // Story subtitles (uGUITextVoice) are rendered twice from their one native
+    // geometry buffer and must remain on the shared canvas. Only the game's
+    // already-linked uBioGUISubtitles objects use per-viewport classification.
+    if (!IsBioSubtitleController(controller) ||
+        IsBadReadPtr((void*)(controller + previousControllerOffset), sizeof(uintptr_t)))
+    {
+        return SubtitleViewportSide::Automatic;
+    }
+
+    const auto nextController = *(uintptr_t*)(controller + nextControllerOffset);
+    if (nextController != controller && IsBioSubtitleController(nextController))
+        return SubtitleViewportSide::Left;
+
+    const auto previousController = *(uintptr_t*)(controller + previousControllerOffset);
+    if (previousController != controller && IsBioSubtitleController(previousController))
+        return SubtitleViewportSide::Right;
+
+    return SubtitleViewportSide::Automatic;
+}
+
+#if 0 // Superseded: native TextVoice geometry is replayed instead of cloned.
+static uintptr_t EnsureTextVoiceClone(uintptr_t controller)
+{
+    constexpr uintptr_t nextControllerOffset = 0x14;
+    constexpr uintptr_t previousControllerOffset = 0x18;
+    constexpr uintptr_t createTextVoiceAddress = 0x00967B50;
+
+    if (!IsTextVoiceController(controller) ||
+        controller != gTextVoicePrimaryController ||
+        IsBadReadPtr((void*)(controller + previousControllerOffset), sizeof(uintptr_t)))
+    {
+        return 0;
+    }
+
+
+    const auto registeredClone = gTextVoiceCloneController;
+    if (IsTextVoiceController(registeredClone))
+        return registeredClone;
+
+    // E18040 can run concurrently on several render workers. Only one of them
+    // may allocate and splice the clone into the intrusive GUI object list.
+    if (InterlockedCompareExchange(&gTextVoiceCloneCreationState, 1, 0) != 0)
+        return 0;
+
+    const auto nextController = *(uintptr_t*)(controller + nextControllerOffset);
+    if (nextController != controller && IsTextVoiceController(nextController))
+    {
+        gTextVoiceCloneController = nextController;
+        InterlockedExchange(&gTextVoiceCloneCreationState, 2);
+        return nextController;
+    }
+
+    const auto previousController = *(uintptr_t*)(controller + previousControllerOffset);
+    if (previousController != controller && IsTextVoiceController(previousController))
+    {
+        InterlockedExchange(&gTextVoiceCloneCreationState, 0);
+        return 0;
+    }
+
+    const auto createTextVoice =
+        reinterpret_cast<void* (__cdecl*)()>(createTextVoiceAddress);
+    const auto clone = reinterpret_cast<uintptr_t>(createTextVoice());
+    if (!IsTextVoiceController(clone))
+    {
+        InterlockedExchange(&gTextVoiceCloneCreationState, 0);
+        return 0;
+    }
+
+    // uGUI instances of one class form the manager's intrusive list through
+    // +0x14/+0x18. Inserting a freshly constructed object here lets the native
+    // manager perform activation and asynchronous resource loading itself.
+    *(uintptr_t*)(clone + nextControllerOffset) = nextController;
+    *(uintptr_t*)(clone + previousControllerOffset) = controller;
+    if (nextController &&
+        !IsBadReadPtr((void*)(nextController + previousControllerOffset), sizeof(uintptr_t)))
+    {
+        *(uintptr_t*)(nextController + previousControllerOffset) = clone;
+    }
+    *(uintptr_t*)(controller + nextControllerOffset) = clone;
+    gTextVoiceCloneController = clone;
+    InterlockedExchange(&gTextVoiceCloneCreationState, 2);
+
+    DBGONLY(spd::log()->info(
+        "[TEXTVOICE-PAIR] linked primary=0x{:08X} clone=0x{:08X} oldNext=0x{:08X}",
+        static_cast<uint32_t>(controller), static_cast<uint32_t>(clone),
+        static_cast<uint32_t>(nextController));)
+    return clone;
+}
+
+static void SynchronizeTextVoiceCloneState(uintptr_t controller, uintptr_t clone)
+{
+    constexpr uintptr_t guiStateFlagsOffset = 0x148;
+    constexpr uint32_t guiEnabledAndDirtyMask = 0x201;
+    constexpr uintptr_t voiceStateOffsets[] = {
+        0x25C, // current outer state
+        0x260, // current inner state
+        0x264, // requested outer state
+        0x268, // requested inner state
+        0x26C, // previous outer state
+    };
+
+    // 0x968DF0 only dispatches the native TextVoice layout callback while bit
+    // zero is set. A factory-created clone otherwise remains at 0x1000 and is
+    // reset to its idle state every frame, even though its text buffer already
+    // contains the mirrored string. Copy the primary object's enabled/dirty
+    // bits so the clone can build and update its own glyph geometry.
+    const auto primaryFlags =
+        *reinterpret_cast<const uint32_t*>(controller + guiStateFlagsOffset);
+    auto& cloneFlags =
+        *reinterpret_cast<uint32_t*>(clone + guiStateFlagsOffset);
+    cloneFlags = (cloneFlags & ~guiEnabledAndDirtyMask) |
+        (primaryFlags & guiEnabledAndDirtyMask);
+
+    for (const auto offset : voiceStateOffsets)
+    {
+        *reinterpret_cast<uint32_t*>(clone + offset) =
+            *reinterpret_cast<const uint32_t*>(controller + offset);
+    }
+}
+
+static void MirrorTextVoiceEvent(
+    SafetyHookInline& hook, void* object, void* edx, const char* eventName)
+{
+    const auto controller = reinterpret_cast<uintptr_t>(object);
+    const auto viewportSide = GetLinkedSubtitleViewportSide(controller);
+
+    // Run the native event on the object selected by the game first. Calling
+    // through SafetyHook's trampoline avoids entering this detour recursively.
+    hook.unsafe_fastcall<void>(object, edx);
+
+    if (!IsSplitScreenActive() || viewportSide != SubtitleViewportSide::Left)
+        return;
+
+    constexpr uintptr_t nextControllerOffset = 0x14;
+    constexpr uintptr_t guiRootOffset = 0xF4;
+    constexpr uintptr_t textNodeOffset = 0x2C4;
+    const auto clone = *(uintptr_t*)(controller + nextControllerOffset);
+    if (!IsTextVoiceController(clone) ||
+        IsBadReadPtr((void*)(clone + textNodeOffset), sizeof(uintptr_t)) ||
+        !*(uintptr_t*)(clone + guiRootOffset) ||
+        !*(uintptr_t*)(clone + textNodeOffset))
+    {
+        DBGONLY(spd::log()->warn(
+            "[TEXTVOICE-EVENT] {} not mirrored; clone is not resource-ready",
+            eventName);)
+        return;
+    }
+
+    constexpr uintptr_t layoutModeOffset = 0x2B1;
+    SynchronizeTextVoiceCloneState(controller, clone);
+    *reinterpret_cast<uint8_t*>(clone + layoutModeOffset) =
+        *reinterpret_cast<uint8_t*>(controller + layoutModeOffset);
+
+    hook.unsafe_fastcall<void>(reinterpret_cast<void*>(clone), nullptr);
+}
+
+void __fastcall TextVoiceVoiceStop(void* object, void* edx)
+{
+    MirrorTextVoiceEvent(gTextVoiceVoiceStopHook, object, edx, "stop");
+}
+
+void __fastcall TextVoiceVoiceStart(void* object, void* edx)
+{
+    MirrorTextVoiceEvent(gTextVoiceVoiceStartHook, object, edx, "start");
+}
+
+void __fastcall TextVoiceVoiceAdvance(void* object, void* edx)
+{
+    MirrorTextVoiceEvent(gTextVoiceVoiceAdvanceHook, object, edx, "advance");
+}
+
+void __fastcall TextVoiceVoiceReset(void* object, void* edx)
+{
+    MirrorTextVoiceEvent(gTextVoiceVoiceResetHook, object, edx, "reset");
+}
+
+void __stdcall TextVoiceSetText(void* textNode, const char* text)
+{
+    constexpr uintptr_t ownerControllerOffset = 0x74;
+    constexpr uintptr_t nextControllerOffset = 0x14;
+    constexpr uintptr_t textNodeOffset = 0x2C4;
+
+    const auto node = reinterpret_cast<uintptr_t>(textNode);
+    uintptr_t controller = 0;
+    if (node && !IsBadReadPtr(
+            reinterpret_cast<void*>(node + ownerControllerOffset), sizeof(uintptr_t)))
+    {
+        controller = *reinterpret_cast<uintptr_t*>(node + ownerControllerOffset);
+    }
+
+    gTextVoiceSetTextHook.unsafe_stdcall<void>(textNode, text);
+
+    if (!IsSplitScreenActive() || !IsTextVoiceController(controller) ||
+        GetLinkedSubtitleViewportSide(controller) != SubtitleViewportSide::Left)
+    {
+        return;
+    }
+
+    const auto clone = *reinterpret_cast<uintptr_t*>(controller + nextControllerOffset);
+    if (!IsTextVoiceController(clone))
+        return;
+
+    const auto cloneTextNode = *reinterpret_cast<uintptr_t*>(clone + textNodeOffset);
+    if (!cloneTextNode || cloneTextNode == node)
+        return;
+
+    SynchronizeTextVoiceCloneState(controller, clone);
+
+    // 0x969E40 consumes the string synchronously and rebuilds the destination
+    // text node. Replaying the same call is safe even when `text` points to a
+    // temporary localization buffer because it happens before the caller returns.
+    gTextVoiceSetTextHook.unsafe_stdcall<void>(
+        reinterpret_cast<void*>(cloneTextNode), text);
+    DBGONLY(spd::log()->info(
+        "[TEXTVOICE-TEXT] primaryNode=0x{:08X} cloneNode=0x{:08X} "
+        "primaryFlags=0x{:08X} cloneFlags=0x{:08X} text={}",
+        static_cast<uint32_t>(node), static_cast<uint32_t>(cloneTextNode),
+        *reinterpret_cast<const uint32_t*>(controller + 0x148),
+        *reinterpret_cast<const uint32_t*>(clone + 0x148),
+        text ? text : "<null>");)
+}
+#endif
+
+static void RenderSubtitleAtSplitViewport(
+    int object, int a2, SubtitleViewportSide side, bool forceHalfWidth)
+{
+    constexpr uintptr_t contextOffset = 0x04;
+    constexpr uintptr_t leftBoundOffset = 47 * sizeof(uint32_t);
+    constexpr uintptr_t rightBoundOffset = 49 * sizeof(uint32_t);
+
+    auto& viewportOriginX = *(int32_t*)0x15DDFD8;
+    const auto originalViewportOriginX = viewportOriginX;
+    const auto originalPassTranslationXNdc = gSubtitlePassTranslationXNdc;
+    const auto splitWidth = GetCurrentSplitScreenResX();
+    const bool usesHalfPixelOrigin = originalViewportOriginX == 1 ||
+        originalViewportOriginX == splitWidth + 1;
+
+    uintptr_t renderContext = 0;
+    int32_t originalRightBound = 0;
+    bool changedRightBound = false;
+    if (forceHalfWidth && a2 && !IsBadReadPtr((void*)(a2 + contextOffset), sizeof(uintptr_t)))
+    {
+        renderContext = *(uintptr_t*)(a2 + contextOffset);
+        if (renderContext &&
+            !IsBadReadPtr((void*)(renderContext + rightBoundOffset), sizeof(int32_t)))
+        {
+            const auto leftBound = *(int32_t*)(renderContext + leftBoundOffset);
+            auto& rightBound = *(int32_t*)(renderContext + rightBoundOffset);
+            originalRightBound = rightBound;
+            if (rightBound - leftBound != splitWidth)
+            {
+                rightBound = leftBound + splitWidth;
+                changedRightBound = true;
+            }
+        }
+    }
+
+    viewportOriginX = (side == SubtitleViewportSide::Right ? splitWidth : 0) +
+        (usesHalfPixelOrigin ? 1 : 0);
+
+    // The GUI renderer queues this transform and does not retain a temporary
+    // D3D viewport change. Keep both copies in the main split-screen pass and
+    // place the right copy one half-screen (1.0 full-screen NDC) to the right.
+    // txt_voice uses a 640-wide logical center, so apply the same local center
+    // correction to both copies before separating them.
+    constexpr float textVoiceCenterCorrectionXNdc = -0.20833333f;
+    gSubtitlePassTranslationXNdc =
+        (forceHalfWidth && side == SubtitleViewportSide::Right ? 1.0f : 0.0f) +
+        (forceHalfWidth ? textVoiceCenterCorrectionXNdc : 0.0f);
+
+    sub_E18040(object, SUBTITLES, a2);
+    gSubtitlePassTranslationXNdc = originalPassTranslationXNdc;
+    viewportOriginX = originalViewportOriginX;
+
+    if (changedRightBound)
+        *(int32_t*)(renderContext + rightBoundOffset) = originalRightBound;
+}
+
+static uintptr_t GetSubtitleController(uintptr_t object)
+{
+    constexpr uintptr_t ownerOffset = 0x6C;
+
+    if (IsSubtitleController(object))
+        return object;
+
+    if (!object || IsBadReadPtr((void*)(object + ownerOffset), sizeof(uintptr_t)))
+        return 0;
+
+    const auto owner = *(uintptr_t*)(object + ownerOffset);
+    return owner != object && IsSubtitleController(owner) ? owner : 0;
+}
+
+static void RenderTextVoiceForBothViewports(int object, int a2)
+{
+    const auto originalPassOffsetX = gSubtitlePassOffsetX;
+
+    // The game owns one story-subtitle geometry buffer. Replaying its normal
+    // transform/draw path queues that already-built geometry twice without
+    // cloning the TextVoice object or its fragile native lifecycle state.
+    gSubtitlePassOffsetX = originalPassOffsetX + fSubtitleLeftOffsetX;
+    sub_E18040(object, SUBTITLES, a2);
+    gSubtitlePassOffsetX = originalPassOffsetX + fSubtitleRightOffsetX;
+    sub_E18040(object, SUBTITLES, a2);
+
+    gSubtitlePassOffsetX = originalPassOffsetX;
+}
+
 void __fastcall sub_E18040_rescale(int _this, int edx, int a2)
 {
-    auto uBioGUISubtitles = (const char*)(*(uintptr_t*)_this + 0x1B8);
+    const bool splitScreenActive = IsSplitScreenActive();
+    const auto subtitleController = GetSubtitleController((uintptr_t)_this);
 
-    if (!IsBadReadPtr(uBioGUISubtitles, sizeof(char*)) && std::string_view(uBioGUISubtitles) == "uBioGUISubtitles")
+    if (subtitleController)
+    {
+        const auto linkedViewportSide =
+            GetLinkedSubtitleViewportSide(subtitleController);
+        const auto subtitleViewportSide = splitScreenActive
+            ? linkedViewportSide
+            : SubtitleViewportSide::Automatic;
+
+        DBGONLY({
+            const LONG64 callCount = InterlockedIncrement64(&gSubtitleTransformCalls);
+            const LONG64 now = static_cast<LONG64>(GetTickCount64());
+            const LONG64 previousLogTick = InterlockedCompareExchange64(
+                &gSubtitleLastPeriodicLogTick, 0, 0);
+            if (now - previousLogTick >= 1000 &&
+                InterlockedCompareExchange64(
+                    &gSubtitleLastPeriodicLogTick, now, previousLogTick) == previousLogTick)
+            {
+                D3DVIEWPORT9 viewport = {};
+                RECT scissor = {};
+                DWORD scissorEnabled = FALSE;
+                HRESULT viewportResult = E_FAIL;
+                HRESULT scissorResult = E_FAIL;
+                HRESULT scissorStateResult = E_FAIL;
+
+                const auto renderer = *(uintptr_t*)0x15E0388;
+                if (renderer && !IsBadReadPtr((void*)(renderer + (0x26 * sizeof(uint32_t))), sizeof(void*)))
+                {
+                    auto device = *(IDirect3DDevice9**)(renderer + (0x26 * sizeof(uint32_t)));
+                    if (device && !IsBadReadPtr(device, sizeof(void*)))
+                    {
+                        viewportResult = device->GetViewport(&viewport);
+                        scissorResult = device->GetScissorRect(&scissor);
+                        scissorStateResult = device->GetRenderState(
+                            D3DRS_SCISSORTESTENABLE, &scissorEnabled);
+                    }
+                }
+
+                spd::log()->info(
+                    "[SUBTITLE-ACTIVE] calls={} this=0x{:08X} controller=0x{:08X} child={} a2=0x{:08X} "
+                    "viewportHr=0x{:08X} viewport=({}, {}, {}x{}) "
+                    "scissorHr=0x{:08X} scissor=({}, {})-({}, {}) "
+                    "scissorStateHr=0x{:08X} enabled={}",
+                    callCount, (uint32_t)_this, (uint32_t)subtitleController,
+                    subtitleController != (uintptr_t)_this, (uint32_t)a2,
+                    (uint32_t)viewportResult, viewport.X, viewport.Y, viewport.Width, viewport.Height,
+                    (uint32_t)scissorResult, scissor.left, scissor.top, scissor.right, scissor.bottom,
+                    (uint32_t)scissorStateResult, scissorEnabled);
+            }
+        })
+
+        if (splitScreenActive && bSubtitlePerPlayer &&
+            IsTextVoiceController(subtitleController))
+        {
+            RenderTextVoiceForBothViewports(_this, a2);
+            return;
+        }
+
+        if (subtitleViewportSide != SubtitleViewportSide::Automatic)
+        {
+            RenderSubtitleAtSplitViewport(
+                _this, a2, subtitleViewportSide, false);
+            return;
+        }
+
         return sub_E18040(_this, SUBTITLES, a2);
+    }
 
     return sub_E18040(_this, RESCALE, a2);
 }
@@ -692,19 +1241,19 @@ IDirect3DPixelShader9* __stdcall CreatePixelShaderHook(const DWORD** a1)
 
 void __stdcall SplitScreenSetupTop(void* a1, int32_t* a2)
 {
-    a2[0] = 0;
-    a2[1] = 0;
-    a2[2] = (int32_t)(720.0f * GetAspectRatio());
-    a2[3] = (int32_t)(720.0f / 2.0f);
+    a2[0] = 0;                                         // X start
+    a2[1] = 0;                                         // Y start
+    a2[2] = (int32_t)(720.0f * GetAspectRatio() / 2.0f); // X end (half width)
+    a2[3] = (int32_t)(720.0f);                         // Y end (full height)
     return injector::stdcall<void(void*, int32_t*)>::call(0x4AC310, a1, a2);
 }
 
 void __stdcall SplitScreenSetupBottom(void* a1, int32_t* a2)
 {
-    a2[0] = 0;
-    a2[1] = (int32_t)(720.0f / 2.0f);
-    a2[2] = (int32_t)(720.0f * GetAspectRatio());
-    a2[3] = (int32_t)(720.0f);
+    a2[0] = (int32_t)(720.0f * GetAspectRatio() / 2.0f); // X start (half width start)
+    a2[1] = 0;                                           // Y start
+    a2[2] = (int32_t)(720.0f * GetAspectRatio());         // X end (full width)
+    a2[3] = (int32_t)(720.0f);                           // Y end (full height)
     return injector::stdcall<void(void*, int32_t*)>::call(0x4AC310, a1, a2);
 }
 
@@ -783,21 +1332,83 @@ int sub_984240()
     return nForceLogo - 1;
 }
 
+static bool DisableCoopEffectExclusionFilter()
+{
+    // sBioEffect's updater writes mExclusionTrait=6 for split-screen and 0
+    // otherwise. Change only that native MP contribution to 0 (the SP value).
+    // Per-effect exclusion traits, resource checks, lifetime and view masks
+    // remain untouched. Do not replace the global SP/MP predicate.
+    constexpr uintptr_t checkAddress = 0xA85C6C;
+    constexpr uint8_t expected[] = {
+        0xA1, 0x8C, 0xE8, 0x5D, 0x01,             // mov eax,[15DE88C]
+        0x33, 0xC9,                               // xor ecx,ecx
+        0x83, 0xB8, 0xE0, 0x0C, 0x00, 0x00, 0x01, // cmp [eax+CE0],1
+        0xBA, 0x06, 0x00, 0x00, 0x00,             // mov edx,6
+        0x0F, 0x44, 0xCA,                         // cmove ecx,edx
+        0x89, 0x8F, 0x28, 0x02, 0x00, 0x00        // mov [edi+228],ecx
+    };
+    if (std::memcmp(reinterpret_cast<const void*>(checkAddress),
+                    expected, sizeof(expected)) != 0)
+    {
+        OutputDebugStringA("[GRAPHICS] Co-op effect filter patch skipped: unexpected code bytes\n");
+        DBGONLY(spd::log()->warn(
+            "[GRAPHICS] DisableCoopEffectFilter skipped: unexpected code bytes");)
+        return false;
+    }
+    injector::WriteMemory<uint32_t>(checkAddress + 15, 0, true);
+    DBGONLY(spd::log()->info(
+        "[GRAPHICS] DisableCoopEffectFilter: native MP exclusion mask 6 -> 0");)
+    return true;
+}
+
+static bool EnableCoopBulletMarkCreation()
+{
+    // sAdh::BulletMark creation (0xA7C390) exits when the cached split mode
+    // at sRender+0xCE0 is 1. Bypass ONLY that exit, not the global game mode,
+    // material checks, slot limit, resource lifetime or render routing.
+    // Runtime appearance/stability is still unverified; opt-in INI test only.
+    constexpr uintptr_t checkAddress = 0xA7C3B2;
+    constexpr uint8_t expected[] = {
+        0x83, 0xB8, 0xE0, 0x0C, 0x00, 0x00, 0x01, // cmp [eax+CE0],1
+        0x0F, 0x84, 0x1D, 0x47, 0x00, 0x00        // je A80ADC (exit)
+    };
+    if (std::memcmp(reinterpret_cast<const void*>(checkAddress),
+                    expected, sizeof(expected)) != 0)
+    {
+        OutputDebugStringA("[GRAPHICS] Bullet-mark patch skipped: unexpected code bytes\n");
+        DBGONLY(spd::log()->warn(
+            "[GRAPHICS] RestoreCoopBulletMarks skipped: unexpected code bytes");)
+        return false;
+    }
+    injector::MakeNOP(checkAddress + 7, 6, true);
+    DBGONLY(spd::log()->info(
+        "[GRAPHICS] RestoreCoopBulletMarks: creation gate bypassed (experimental)");)
+    return true;
+}
+
+#include "CoopRuntime.h"
+#include "CoopMenuRuntime.h"
+
 void Init()
 {
     CIniReader iniReader("");
+    DBGONLY(spd::log()->info("[INIT] RE:Rev2 persistent co-op HUD/input + dual-pass subtitles build loaded");)
     auto bSkipIntro = iniReader.ReadInteger("MAIN", "SkipIntro", 1) != 0;
     auto bBorderlessWindowed = iniReader.ReadInteger("MAIN", "BorderlessWindowed", 1) != 0;
     auto bDisableDamageOverlay = iniReader.ReadInteger("MAIN", "DisableDamageOverlay", 1) != 0;
     auto bDisableFilmGrain = iniReader.ReadInteger("MAIN", "DisableFilmGrain", 1) != 0;
     auto bDisableFade = iniReader.ReadInteger("MAIN", "DisableFade", 0) != 0;
     auto bDisableGUICommandFar = iniReader.ReadInteger("MAIN", "DisableGUICommandFar", 0) != 0;
-    fFOVFactor= iniReader.ReadFloat("MAIN", "FOVFactor", 1.0f);
+    fFOVFactor = iniReader.ReadFloat("MAIN", "FOVFactor", 1.0f);
     if (fFOVFactor <= 0.0f) fFOVFactor = 1.0f;
     bDisableCreateQuery = iniReader.ReadInteger("MAIN", "DisableCreateQuery", 0) != 0;
     auto bAutoclicker = iniReader.ReadInteger("MAIN", "Autoclicker", 0) != 0;
     nForceLogo = std::clamp(iniReader.ReadInteger("MAIN", "ForceLogo", 0), 0, 4);
-    
+    LoadHudTuningFromIni(); // ✅ Load your [HUD] values from INI
+    if (iniReader.ReadInteger("GRAPHICS", "DisableCoopEffectFilter", 0) != 0)
+        DisableCoopEffectExclusionFilter();
+    if (iniReader.ReadInteger("GRAPHICS", "RestoreCoopBulletMarks", 0) != 0)
+        EnableCoopBulletMarkCreation();
     if (bSkipIntro)
     {
         injector::WriteMemory<uint8_t>(0xA62A74, 0xEB, true);
@@ -810,57 +1421,61 @@ void Init()
 
     // overwriting aspect ratio
     hook::pattern("0F 84 ? ? ? ? 48 ? ? 48 ? ? 89 8E").for_each_result([](hook::pattern_match match)
-    {
-        struct hook_ecx_edx { void operator()(injector::reg_pack& regs) { 
-            ResX = regs.ecx;
-            ResY = regs.edx;
+        {
+            struct hook_ecx_edx {
+                void operator()(injector::reg_pack& regs) {
+                    ResX = regs.ecx;
+                    ResY = regs.edx;
 
-            if (((float)ResX / (float)ResY) < defaultAspectRatio)
-            {
-                ResY = 9 * ResX / 16;
-                regs.edx = ResY;
-            }
-        } };
-        injector::MakeInline<hook_ecx_edx>(match.get<void>(0), match.get<void>(12));
-    });
+                    if (((float)ResX / (float)ResY) < defaultAspectRatio)
+                    {
+                        ResY = 9 * ResX / 16;
+                        regs.edx = ResY;
+                    }
+                }
+            };
+            injector::MakeInline<hook_ecx_edx>(match.get<void>(0), match.get<void>(12));
+        });
 
     hook::pattern("0F 84 ? ? ? ? 48 ? ? 48 ? ? 89 9E").for_each_result([](hook::pattern_match match)
-    {
-        struct hook_ebx_edi { void operator()(injector::reg_pack& regs) {
-            ResX = regs.ebx;
-            ResY = regs.edi;
+        {
+            struct hook_ebx_edi {
+                void operator()(injector::reg_pack& regs) {
+                    ResX = regs.ebx;
+                    ResY = regs.edi;
 
-            if (((float)ResX / (float)ResY) < defaultAspectRatio)
-            {
-                ResY = 9 * ResX / 16;
-                regs.edi = ResY;
-            }
-        } };
-        injector::MakeInline<hook_ebx_edi>(match.get<void>(0), match.get<void>(12));
-    });
+                    if (((float)ResX / (float)ResY) < defaultAspectRatio)
+                    {
+                        ResY = 9 * ResX / 16;
+                        regs.edi = ResY;
+                    }
+                }
+            };
+            injector::MakeInline<hook_ebx_edi>(match.get<void>(0), match.get<void>(12));
+        });
 
     // movies fix for ultra wide
     {
         static auto DrawPrimitiveHook = safetyhook::create_mid(0xCC8788, [](SafetyHookContext& regs)
-        {
-            auto g_device = (IDirect3DDevice9*)regs.edi;
+            {
+                auto g_device = (IDirect3DDevice9*)regs.edi;
 
-            // switch to a x-scaling vertex shader if drawing FMVs
-            IDirect3DPixelShader9* frag;
-            g_device->GetPixelShader(&frag);
-            if (frag != g_wmvYuvDecodePixelShader)
-                return;
+                // switch to a x-scaling vertex shader if drawing FMVs
+                IDirect3DPixelShader9* frag;
+                g_device->GetPixelShader(&frag);
+                if (frag != g_wmvYuvDecodePixelShader)
+                    return;
 
-            IDirect3DVertexShader9* vert;
-            g_device->GetVertexShader(&vert);
-            if (vert != g_screenVertexShader)
-                return;
+                IDirect3DVertexShader9* vert;
+                g_device->GetVertexShader(&vert);
+                if (vert != g_screenVertexShader)
+                    return;
 
-            g_device->SetVertexShader(g_myScreenVertexShader);
-            const float horzScaleFactor = (defaultAspectRatio / GetAspectRatio());
-            const std::array<float, 4> shaderConsts = { horzScaleFactor, 0.0f, 0.0f, 0.0f };
-            g_device->SetVertexShaderConstantF(20, shaderConsts.data(), 1);
-        });
+                g_device->SetVertexShader(g_myScreenVertexShader);
+                const float horzScaleFactor = (defaultAspectRatio / GetAspectRatio());
+                const std::array<float, 4> shaderConsts = { horzScaleFactor, 0.0f, 0.0f, 0.0f };
+                g_device->SetVertexShaderConstantF(20, shaderConsts.data(), 1);
+            });
     }
 
     // split screen windows dimensions
@@ -886,18 +1501,44 @@ void Init()
         injector::WriteMemory(uGUIDamage2, sub_E18040_stretch, true);
     }
 
+    if (iniReader.ReadInteger("COOP", "ViewportHud", 1) != 0)
+        rev2coop::Report(rev2coop::InstallHud()
+            ? "[COOP] SP layout/height-uniform geometry enabled for Equip/Heal/HealNum/Flash/ReticleBase"
+            : "[COOP] HUD skipped: native code/vtable guard failed or allocation unavailable");
+    if (iniReader.ReadInteger("COOP", "NativeKeyboardMousePlayer1", 1) != 0)
+        rev2coop::Report(rev2coop::InstallInput()
+            ? "[COOP] Native P1 keyboard/mouse isolation and bridge capture coordination enabled"
+            : "[COOP] Native input skipped: code guard failed or allocation unavailable");
+    if (iniReader.ReadInteger("COOP", "AdaptiveInventory", 1) != 0)
+        rev2coop::Report(rev2coop::InstallInventory()
+            ? "[COOP] Adaptive Campaign Inventory/Quick Menu and item previews enabled"
+            : "[COOP] Inventory skipped: native code/vtable guard failed or allocation unavailable");
+    const auto partnerViewport =
+        iniReader.ReadInteger("COOP", "PartnerCommandViewport", 1) != 0;
+    const auto keyboardPartnerCommand =
+        iniReader.ReadInteger("COOP", "KeyboardPartnerCommand", 1) != 0;
+    if (!bDisableGUICommandFar && (partnerViewport || keyboardPartnerCommand))
+        rev2coop::Report(rev2coop::InstallPartnerCommand(keyboardPartnerCommand)
+            ? "[COOP] Viewport-local Near/Far partner command and P1 keyboard Tab enabled"
+            : "[COOP] Partner command skipped: native code/vtable guard failed or allocation unavailable");
+    else if (bDisableGUICommandFar && (partnerViewport || keyboardPartnerCommand))
+        rev2coop::Report("[COOP] Partner command skipped because MAIN.DisableGUICommandFar is enabled");
+    // Publish installed hooks before starting the background IPC reader.
+    const auto tuningThread = CreateThread(nullptr, 0, IniHotkeyThread, nullptr, 0, nullptr);
+    if (tuningThread) CloseHandle(tuningThread);
+
     //Camera near clip fix
-    injector::MakeCALL(0x4B17CA,  sub_B82960, true);
-    injector::MakeCALL(0x4B6F67,  sub_B82960, true);
-    injector::MakeCALL(0x9D543D,  sub_B82960, true);
-    injector::MakeCALL(0xC89DE9,  sub_B82960, true);
-    injector::MakeCALL(0xCA97D5,  sub_B82960, true);
-    injector::MakeCALL(0xDFEA3A,  sub_B82960, true);
-    injector::MakeCALL(0xE0C9ED,  sub_B82960, true);
-    injector::MakeCALL(0xE720D2,  sub_B82960, true);
-    injector::MakeCALL(0xF0A652,  sub_B82960, true);
-    injector::MakeCALL(0xF28D7B,  sub_B82960, true);
-    injector::MakeCALL(0xF4E190,  sub_B82960, true);
+    injector::MakeCALL(0x4B17CA, sub_B82960, true);
+    injector::MakeCALL(0x4B6F67, sub_B82960, true);
+    injector::MakeCALL(0x9D543D, sub_B82960, true);
+    injector::MakeCALL(0xC89DE9, sub_B82960, true);
+    injector::MakeCALL(0xCA97D5, sub_B82960, true);
+    injector::MakeCALL(0xDFEA3A, sub_B82960, true);
+    injector::MakeCALL(0xE0C9ED, sub_B82960, true);
+    injector::MakeCALL(0xE720D2, sub_B82960, true);
+    injector::MakeCALL(0xF0A652, sub_B82960, true);
+    injector::MakeCALL(0xF28D7B, sub_B82960, true);
+    injector::MakeCALL(0xF4E190, sub_B82960, true);
     injector::MakeCALL(0x102F9D9, sub_B82960, true);
 
     //3d items in the inventory
@@ -911,8 +1552,8 @@ void Init()
 
     //disable shader overlays (don't scale to fullscreen)
     {
-      injector::MakeCALL(0xFFB9E2, CreateVertexShaderHook, true);
-      injector::MakeCALL(0xFFBA31, CreatePixelShaderHook, true);
+        injector::MakeCALL(0xFFB9E2, CreateVertexShaderHook, true);
+        injector::MakeCALL(0xFFBA31, CreatePixelShaderHook, true);
 
         //struct SetVertexShaderHook
         //{
@@ -981,7 +1622,7 @@ void Init()
         pXInputGetState = std::move(IATHook::Replace(GetModuleHandleA(NULL), "XINPUT1_3.dll",
             std::forward_as_tuple("XInputGetState@2", XInputGetStateHook)
         )["XInputGetState@2"]);
-        
+
         auto pattern = hook::pattern("E8 ? ? ? ? 8B D0 85 D2 75 13 8B 07 8B CF FF 50 60 56 FF 15 ? ? ? ? 5E 5F C2 0C 00 8B CA 53 8D 59 01 8D A4 24");
         hb_954B40.fun = injector::MakeCALL(pattern.get_first(), sub_954B40, true).get();
     }
@@ -1005,75 +1646,81 @@ void Init()
         static auto sPlayerPtr = *hook::get_pattern<void*>("8B 0D ? ? ? ? 56 E8 ? ? ? ? 85 C0 74 7B 8B C8", 2);
 
         LEDEffects::Inject([]()
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            
-            if (sPlayerPtr)
             {
-                static auto sub_6E6A70 = [](int* _this) -> void*
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                if (sPlayerPtr)
                 {
-                    if (!_this)
-                        return nullptr;
-            
-                    auto j = 0;
-                    for (auto i = _this + 8; !*i || *(DWORD*)(*i + 0x7920); ++i)
-                    {
-                        if (++j >= 8)
-                            return nullptr;
-                    }
-                    return (void*)_this[j + 8];
-                };
-                auto pPlayerPtr = sub_6E6A70(*(int**)sPlayerPtr);
-            
-                if (pPlayerPtr)
-                {
-                    auto Player1Health = PtrWalkthrough<int32_t>(&pPlayerPtr, 0x1A08);
-                    auto Player2Health = PtrWalkthrough<int32_t>(&pPlayerPtr, 0x1A0C);
-            
-                    if (Player1Health && Player2Health)
-                    {
-                        auto health1 = *Player1Health;
-                        auto health2 = *Player2Health;
-                        if (health1 > 1)
+                    static auto sub_6E6A70 = [](int* _this) -> void*
                         {
-                            if (health1 <= 250) {
-                                LEDEffects::SetLightingLeftSide(26, 4, 4, true, false); //red
-                                LEDEffects::DrawCardiogram(100, 0, 0, 0, 0, 0); //red
+                            if (!_this)
+                                return nullptr;
+
+                            auto j = 0;
+                            for (auto i = _this + 8; !*i || *(DWORD*)(*i + 0x7920); ++i)
+                            {
+                                if (++j >= 8)
+                                    return nullptr;
                             }
-                            else if (health1 <= 350) {
-                                LEDEffects::SetLightingLeftSide(50, 30, 4, true, false); //orange
-                                LEDEffects::DrawCardiogram(67, 0, 0, 0, 0, 0); //orange
+                            return (void*)_this[j + 8];
+                        };
+                    auto pPlayerPtr = sub_6E6A70(*(int**)sPlayerPtr);
+
+                    if (pPlayerPtr)
+                    {
+                        auto Player1Health = PtrWalkthrough<int32_t>(&pPlayerPtr, 0x1A08);
+                        auto Player2Health = PtrWalkthrough<int32_t>(&pPlayerPtr, 0x1A0C);
+
+                        if (Player1Health && Player2Health)
+                        {
+                            auto health1 = *Player1Health;
+                            auto health2 = *Player2Health;
+                            if (health1 > 1)
+                            {
+                                if (health1 <= 250) {
+                                    LEDEffects::SetLightingLeftSide(26, 4, 4, true, false); //red
+                                    LEDEffects::DrawCardiogram(100, 0, 0, 0, 0, 0); //red
+                                }
+                                else if (health1 <= 350) {
+                                    LEDEffects::SetLightingLeftSide(50, 30, 4, true, false); //orange
+                                    LEDEffects::DrawCardiogram(67, 0, 0, 0, 0, 0); //orange
+                                }
+                                else {
+                                    LEDEffects::SetLightingLeftSide(10, 30, 4, true, false);  //green
+                                    LEDEffects::DrawCardiogram(0, 100, 0, 0, 0, 0); //green
+                                }
                             }
-                            else {
-                                LEDEffects::SetLightingLeftSide(10, 30, 4, true, false);  //green
-                                LEDEffects::DrawCardiogram(0, 100, 0, 0, 0, 0); //green
+                            else
+                            {
+                                LEDEffects::SetLightingLeftSide(26, 4, 4, false, true); //red
+                                LEDEffects::DrawCardiogram(100, 0, 0, 0, 0, 0, true);
+                            }
+
+                            if (health2 > 1)
+                            {
+                                if (health2 <= 250) {
+                                    LEDEffects::SetLightingRightSide(26, 4, 4, true, false); //red
+                                    LEDEffects::DrawCardiogramNumpad(100, 0, 0, 0, 0, 0); //red
+                                }
+                                else if (health2 <= 350) {
+                                    LEDEffects::SetLightingRightSide(50, 30, 4, true, false); //orange
+                                    LEDEffects::DrawCardiogramNumpad(67, 0, 0, 0, 0, 0); //orange
+                                }
+                                else {
+                                    LEDEffects::SetLightingRightSide(10, 30, 4, true, false);  //green
+                                    LEDEffects::DrawCardiogramNumpad(0, 100, 0, 0, 0, 0); //green
+                                }
+                            }
+                            else
+                            {
+                                LEDEffects::SetLightingRightSide(26, 4, 4, false, true); //red
+                                LEDEffects::DrawCardiogramNumpad(100, 0, 0, 0, 0, 0, true);
                             }
                         }
                         else
                         {
-                            LEDEffects::SetLightingLeftSide(26, 4, 4, false, true); //red
-                            LEDEffects::DrawCardiogram(100, 0, 0, 0, 0, 0, true);
-                        }
-            
-                        if (health2 > 1)
-                        {
-                            if (health2 <= 250) {
-                                LEDEffects::SetLightingRightSide(26, 4, 4, true, false); //red
-                                LEDEffects::DrawCardiogramNumpad(100, 0, 0, 0, 0, 0); //red
-                            }
-                            else if (health2 <= 350) {
-                                LEDEffects::SetLightingRightSide(50, 30, 4, true, false); //orange
-                                LEDEffects::DrawCardiogramNumpad(67, 0, 0, 0, 0, 0); //orange
-                            }
-                            else {
-                                LEDEffects::SetLightingRightSide(10, 30, 4, true, false);  //green
-                                LEDEffects::DrawCardiogramNumpad(0, 100, 0, 0, 0, 0); //green
-                            }
-                        }
-                        else
-                        {
-                            LEDEffects::SetLightingRightSide(26, 4, 4, false, true); //red
-                            LEDEffects::DrawCardiogramNumpad(100, 0, 0, 0, 0, 0, true);
+                            LogiLedStopEffects();
+                            LEDEffects::SetLighting(90, 36, 3);
                         }
                     }
                     else
@@ -1082,22 +1729,16 @@ void Init()
                         LEDEffects::SetLighting(90, 36, 3);
                     }
                 }
-                else
-                {
-                    LogiLedStopEffects();
-                    LEDEffects::SetLighting(90, 36, 3);
-                }
-            }
-        });
+            });
     }
 }
 
 CEXP void InitializeASI()
 {
     std::call_once(CallbackHandler::flag, []()
-    {
-        CallbackHandler::RegisterCallbackAtGetSystemTimeAsFileTime(Init, hook::pattern("F3 0F 5C 15 ? ? ? ? F3 0F 59 E5"));
-    });
+        {
+            CallbackHandler::RegisterCallbackAtGetSystemTimeAsFileTime(Init, hook::pattern("F3 0F 5C 15 ? ? ? ? F3 0F 59 E5"));
+        });
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)

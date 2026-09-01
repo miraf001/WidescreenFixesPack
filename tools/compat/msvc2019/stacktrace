@@ -1,0 +1,68 @@
+#pragma once
+
+// VS 2019 predates C++23 <stacktrace>. Preserve the small subset used by the
+// shared WidescreenFixesPack support code while building the focused plugin.
+// CaptureStackBackTrace supplies the same native return addresses needed by
+// IsUALPresent(), without changing the upstream shared sources.
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+namespace std
+{
+    class stacktrace_entry
+    {
+    public:
+        constexpr stacktrace_entry() noexcept = default;
+        explicit constexpr stacktrace_entry(uintptr_t address) noexcept
+            : address_(address)
+        {
+        }
+
+        constexpr uintptr_t native_handle() const noexcept
+        {
+            return address_;
+        }
+
+    private:
+        uintptr_t address_ = 0;
+    };
+
+    class stacktrace
+    {
+    public:
+        using const_iterator = const stacktrace_entry*;
+
+        static stacktrace current(size_t skip = 0) noexcept
+        {
+            stacktrace result;
+            void* addresses[max_depth] = {};
+            const auto count = ::CaptureStackBackTrace(
+                static_cast<DWORD>(skip + 1),
+                static_cast<DWORD>(max_depth), addresses, nullptr);
+
+            result.size_ = static_cast<size_t>(count);
+            for (size_t index = 0; index < result.size_; ++index)
+            {
+                result.entries_[index] = stacktrace_entry(
+                    reinterpret_cast<uintptr_t>(addresses[index]));
+            }
+            return result;
+        }
+
+        constexpr const_iterator begin() const noexcept
+        {
+            return entries_.data();
+        }
+
+        constexpr const_iterator end() const noexcept
+        {
+            return entries_.data() + size_;
+        }
+
+    private:
+        static constexpr size_t max_depth = 62;
+        array<stacktrace_entry, max_depth> entries_ = {};
+        size_t size_ = 0;
+    };
+}

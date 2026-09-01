@@ -1,0 +1,14 @@
+#pragma once
+
+// MSVC 2019 predates the C++23 <expected> header required by the current
+// upstream SafetyHook. The focused local build maps that API to the pinned,
+// header-only tl::expected implementation without modifying the submodule.
+#include <tl/expected.hpp>
+
+namespace std
+{
+    using tl::expected;
+    using tl::unexpected;
+    using tl::unexpect;
+    using tl::unexpect_t;
+}
