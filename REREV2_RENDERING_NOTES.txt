@@ -1465,8 +1465,11 @@ pred drivejsim "neportovat" u titulku a leceni.
   overlay zustava na puvodnim STRETCH a neni tim zasažen.
 - Leceni: permanentni UpdateHud<1> po nativnim updateru najde pouze heal listy
   indexu 0..2 s ownerem controlleru a localY=330. Nastavi jejich localX na
-  `((left+right)/2)*720/(bottom-top)` z aktualniho player viewportu a invaliduje
-  jen jejich matrix cache. Y, scale a jine GUI zustavaji nedotcene.
+  `((right-left)/2)*720/(bottom-top)` z aktualniho player viewportu a invaliduje
+  jen jejich matrix cache. Pro P2 DrawHud na dobu vlastniho draw vezme levy okraj
+  z live render contextu (`a2+4`, bounds index 47/49) jako GUI origin a pak ho
+  ihned vrati. Tim se lokalni stred vykresli uprostred praveho viewportu bez
+  posouvani listu mimo native clip. Y, scale a jine GUI zustavaji nedotcene.
 - Titulky: novy `[COOP] DualMonitorMode=0` je vychozi side-by-side rezim s
   jednou sdilenou kopii. `=1` zapne dve kopie pro dva stejne siroke monitory.
   Render vzdy pocita `splitAspectFix=1/GetDiff()`,
@@ -1479,3 +1482,18 @@ Release kompilace uspesna. Nasazeny kandidat ma SHA256
 2362E8E307E9490751E8A7F1E6C840F2B57DD92A454AB2E0F1F08637AE11CC6B.
 Rollback je pres vydani v0.1.0 SHA256
 BE851691E80096565CE8B088744B97E1195CC6773BDCA5747A72154B207DC5E6.
+
+P2 HEAL VIEWPORT-ORIGIN LIVE TEST - 2026-09-02
+------------------------------------------------
+
+Uzivatel vizualne potvrdil finalni live reseni pro aktivni P2 heal indicator:
+vsechny tri listy zustaly na viewport-local X=320 (pri rectu 960x1080), zatimco
+P2 DrawHud dostal pouze pro svuj draw GUI origin X=960 z vlastniho render contextu
+(bounds 960..1920). Ikona, radial progress i fill se tak vykreslily uprostred
+praveho viewportu. P1 zustal beze zmeny na localX=320 / physicalX=480.
+
+Diagnostika prokazala, ze P2 DrawHud uz mel spravne context bounds960..1920,
+ale pred opravou cetl sdileny GUI origin0. Pokusy o globalni localX=960 nebo
+o translaci rodicu sice vyrobily physicalX=1440, ale byly orezany; nepatri do
+production kodu. Finalni vzorec cte aktualni live viewport/context, proto nema
+pevny offset 1920x1080 a pokryva i jinou sirku/rozliseni.

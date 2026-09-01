@@ -18,9 +18,9 @@ inline bool Active()
 inline void CenterHealProgressInViewport(uintptr_t object, uintptr_t table)
 {
     // The healing icon, radial progress and fill use the same native X=640
-    // anchor. In co-op that projects to the full-screen centre for P1 and to
-    // P2's left edge. Recalculate only those three leaves from their live
-    // physical viewport; their vertical SP anchor stays untouched.
+    // anchor. Keep their X coordinate viewport-local for BOTH players; P2's
+    // physical right-hand placement is selected separately in DrawHud from
+    // its current render context. Their vertical SP anchor stays untouched.
     const auto player = At<uint32_t>(object + 0x2AC);
     const auto gfx = At<uintptr_t>(ViewportGfxPointer);
     if (player > 1 || !gfx) return;
@@ -36,7 +36,7 @@ inline void CenterHealProgressInViewport(uintptr_t object, uintptr_t table)
     if (right <= left || height <= 0) return;
 
     const float localCenterX =
-        ((float)(left + right) * 0.5f) * 720.0f / (float)height;
+        ((float)(right - left) * 0.5f) * 720.0f / (float)height;
     for (uint32_t index = 0; index != 3; ++index)
     {
         const auto node = At<uintptr_t>(table + index * sizeof(uint32_t));
@@ -80,8 +80,42 @@ template<size_t Index> uint32_t __fastcall UpdateHud(uintptr_t object, uintptr_t
 
 inline void __fastcall DrawHud(int object, int unused, int context)
 {
-    if (Active()) sub_E18040(object, 0, context); // no legacy *.8 / +height*.25
-    else sub_E18040_rescale(object, unused, context);
+    if (!Active())
+    {
+        sub_E18040_rescale(object, unused, context);
+        return;
+    }
+
+    // uGUIHeal receives a P2 render context whose bounds are already the
+    // physical right viewport, but the shared GUI transform origin remains
+    // zero. Use that context's live left bound only while queuing this draw.
+    // The local X=viewportWidth/2 set above then maps just like P1 without a
+    // fixed 1920x1080 offset or moving any leaf beyond its native clip area.
+    if (At<uint32_t>(object) == HudClasses[1].vtable &&
+        At<uint32_t>(object + 0x2AC) == 1 && context)
+    {
+        constexpr uintptr_t renderContextOffset = 0x04;
+        constexpr uintptr_t leftBoundOffset = 47 * sizeof(uint32_t);
+        constexpr uintptr_t rightBoundOffset = 49 * sizeof(uint32_t);
+        const auto renderContext = At<uintptr_t>(context + renderContextOffset);
+        if (renderContext)
+        {
+            const auto left = At<int32_t>(renderContext + leftBoundOffset);
+            const auto right = At<int32_t>(renderContext + rightBoundOffset);
+            if (right > left)
+            {
+                auto& viewportOriginX = At<int32_t>(0x15DDFD8);
+                const auto originalViewportOriginX = viewportOriginX;
+                const bool usesHalfPixelOrigin = originalViewportOriginX == 1;
+                viewportOriginX = left + (usesHalfPixelOrigin ? 1 : 0);
+                sub_E18040(object, 0, context); // no legacy *.8 / +height*.25
+                viewportOriginX = originalViewportOriginX;
+                return;
+            }
+        }
+    }
+
+    sub_E18040(object, 0, context); // no legacy *.8 / +height*.25
 }
 
 inline bool Matches(uintptr_t address, const Bytes& bytes)
