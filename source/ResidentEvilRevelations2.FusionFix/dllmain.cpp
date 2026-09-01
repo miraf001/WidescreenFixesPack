@@ -21,7 +21,7 @@ float fSubtitleScaleX = 1.0f;
 float fSubtitleScaleY = 1.0f;
 float fSubtitleLeftOffsetX = -0.25f;
 float fSubtitleRightOffsetX = 0.25f;
-bool bSubtitlePerPlayer = true;
+bool bSubtitlePerPlayer = false;
 
 #if _DEBUG
 alignas(8) volatile LONG64 gSubtitleTransformCalls = 0;
@@ -177,6 +177,10 @@ void LoadHudTuningFromIni()
     fHudOffsetY = iniReader.ReadFloat("HUD", "OffsetY", 0.0f);
     fHudScaleX = iniReader.ReadFloat("HUD", "ScaleX", 1.0f);
     fHudScaleY = iniReader.ReadFloat("HUD", "ScaleY", 1.0f);
+    // Story subtitles are calibrated from the live full canvas in the renderer.
+    // These INI values are deliberately only fine-tuning multipliers/offsets.
+    const bool dualMonitorMode =
+        iniReader.ReadInteger("COOP", "DualMonitorMode", 0) != 0;
     fSubtitleOffsetX = iniReader.ReadFloat("SUBTITLES", "OffsetX", 0.0f);
     fSubtitleOffsetY = iniReader.ReadFloat("SUBTITLES", "OffsetY", 0.0f);
     fSubtitleScaleX = iniReader.ReadFloat("SUBTITLES", "ScaleX", 1.0f);
@@ -185,13 +189,12 @@ void LoadHudTuningFromIni()
         iniReader.ReadFloat("SUBTITLES", "LeftOffsetX", -0.25f);
     fSubtitleRightOffsetX =
         iniReader.ReadFloat("SUBTITLES", "RightOffsetX", 0.25f);
-    bSubtitlePerPlayer =
-        iniReader.ReadInteger("SUBTITLES", "PerPlayer", 1) != 0;
+    bSubtitlePerPlayer = dualMonitorMode;
     DBGONLY(spd::log()->info(
         "[TUNING] HUD offset=({}, {}) scale=({}, {}); subtitles "
-        "perPlayer={} offset=({}, {}) playerX=({}, {}) scale=({}, {})",
+        "dualMonitor={} perPlayer={} offset=({}, {}) playerX=({}, {}) scale=({}, {})",
         fHudOffsetX, fHudOffsetY, fHudScaleX, fHudScaleY,
-        bSubtitlePerPlayer,
+        dualMonitorMode, bSubtitlePerPlayer,
         fSubtitleOffsetX, fSubtitleOffsetY,
         fSubtitleLeftOffsetX, fSubtitleRightOffsetX,
         fSubtitleScaleX, fSubtitleScaleY);)
@@ -328,6 +331,7 @@ enum
     STRETCH = 0xBBBBFFFF,
     OFFSET = 0xCCCCDDDD,
     SUBTITLES = 0xDDDDDDDD,
+    FADE_STRETCH = 0xEEEEDDDD,
 };
 
 void __fastcall sub_E18040(int _this, int edx, int a2)
@@ -463,13 +467,25 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
 
                     if (isSubtitles)
                     {
-                        const float aspectFix = 1.0f / GetDiff();
+                        // The native co-op GUI correction narrows subtitles by
+                        // 1280/800. Reconstruct the single-player transform
+                        // from the current full canvas, never from a fixed
+                        // 1920x1080 offset.
+                        const float splitAspectFix = 1.0f / GetDiff();
+                        const float spAspectFix =
+                            defaultAspectRatio / GetAspectRatio();
+                        const float automaticScaleX =
+                            spAspectFix / splitAspectFix;
+                        const float automaticOffsetX =
+                            (splitAspectFix - spAspectFix) * 0.5f;
                         const float offsetX = screenWidth *
-                            (fSubtitleOffsetX + gSubtitlePassOffsetX);
+                            (automaticOffsetX + fSubtitleOffsetX +
+                             gSubtitlePassOffsetX);
                         const float offsetY = screenHeight * fSubtitleOffsetY;
-                        v13[0] = v14 * v4 * aspectFix * fSubtitleScaleX;
+                        v13[0] = v14 * v4 * splitAspectFix *
+                            automaticScaleX * fSubtitleScaleX;
                         v13[1] = v15 * v5 * fSubtitleScaleY;
-                        v13[2] = (v14 * (v6 + offsetX)) - aspectFix +
+                        v13[2] = (v14 * (v6 + offsetX)) - splitAspectFix +
                             gSubtitlePassTranslationXNdc;
                         v13[3] = (v15 * (v7 + offsetY)) + 1.0f;
                     }
@@ -536,6 +552,7 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
         }
         break;
         case STRETCH:
+        case FADE_STRETCH:
         {
             v14 = (2.0f * GetDiff()) / (float)(v28 - v19);
             v15 = -2.0f / (float)(v21 - v29);
@@ -543,6 +560,20 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
             v13[1] = v15 * v5;
             v13[2] = -1.0f; //(float)(v14 * v6) - fDiffInv;
             v13[3] = (float)(v15 * v7) + 1.0f;
+
+            if (edx == FADE_STRETCH && IsSplitScreenActive())
+            {
+                // uGUIFade's geometry is always 720 logical units high.
+                // Its legacy STRETCH path divided by the physical height, so
+                // a 1080p co-op fade covered only 720/1080 (two thirds) of
+                // each viewport. Keep its separately verified X correction
+                // intact and scale only the native Y geometry/offset.
+                constexpr float nativeFadeHeight = 720.0f;
+                const float heightFactor =
+                    (float)(v21 - v29) / nativeFadeHeight;
+                v13[1] *= heightFactor;
+                v13[3] = ((v13[3] - 1.0f) * heightFactor) + 1.0f;
+            }
         }
         break;
         case OFFSET:
@@ -1061,6 +1092,11 @@ void __fastcall sub_E18040_stretch(int _this, int edx, int a2)
     return sub_E18040(_this, STRETCH, a2);
 }
 
+void __fastcall sub_E18040_fade(int _this, int edx, int a2)
+{
+    return sub_E18040(_this, FADE_STRETCH, a2);
+}
+
 void __fastcall sub_E18040_offset(int _this, int edx, int a2)
 {
     return sub_E18040(_this, OFFSET, a2);
@@ -1392,7 +1428,7 @@ static bool EnableCoopBulletMarkCreation()
 void Init()
 {
     CIniReader iniReader("");
-    DBGONLY(spd::log()->info("[INIT] RE:Rev2 persistent co-op HUD/input + dual-pass subtitles build loaded");)
+    DBGONLY(spd::log()->info("[INIT] RE:Rev2 persistent co-op HUD/input + selectable subtitle mode build loaded");)
     auto bSkipIntro = iniReader.ReadInteger("MAIN", "SkipIntro", 1) != 0;
     auto bBorderlessWindowed = iniReader.ReadInteger("MAIN", "BorderlessWindowed", 1) != 0;
     auto bDisableDamageOverlay = iniReader.ReadInteger("MAIN", "DisableDamageOverlay", 1) != 0;
@@ -1485,7 +1521,7 @@ void Init()
     // GUI
     injector::MakeJMP(0xE18040, sub_E18040_rescale, true);
 
-    injector::WriteMemory(uGUIFade, sub_E18040_stretch, true);
+    injector::WriteMemory(uGUIFade, sub_E18040_fade, true);
     injector::WriteMemory(uGUICommandBase, sub_E18040, true);
     injector::WriteMemory(uGUICommandFar, sub_E18040_offset, true);
     injector::WriteMemory(uGUICommandNear, sub_E18040, true);

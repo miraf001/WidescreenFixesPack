@@ -24,6 +24,13 @@ developed and tested against the current Steam executable.
 - Viewport-local partner CommandNear and CommandFar indicators for both players.
 - Player 1 keyboard `Tab` shows the partner indicator in co-op for about three
   seconds while preserving native character switching in single-player.
+- Healing icon, progress ring and fill centered in the owning player's
+  viewport.
+- Full-height fade-to-black in split screen, derived from the active viewport
+  height.
+- Story subtitles calibrated to their single-player scale and height: shared
+  in side-by-side mode, or duplicated at the centres of two monitors when
+  `DualMonitorMode` is enabled.
 
 All co-op transforms read the live viewport dimensions. They are not fixed
 offsets for one resolution and are designed to work at 16:9 and wider desktop
@@ -48,7 +55,14 @@ NativeKeyboardMousePlayer1 = 1
 AdaptiveInventory = 1
 PartnerCommandViewport = 1
 KeyboardPartnerCommand = 1
+DualMonitorMode = 0
 ```
+
+`DualMonitorMode = 0` is the single-monitor side-by-side default: one shared
+story subtitle is centered on the combined screen. Set it to `1` only when the
+game spans two equal-resolution monitors; the subtitle is then rendered once in
+the centre of each monitor. Its position and scale are derived from the live
+combined resolution in both modes.
 
 The optional keyboard-to-gamepad bridge is documented in
 [DEVELOPMENT.md](DEVELOPMENT.md). Its hotkeys include F8 to select the virtual

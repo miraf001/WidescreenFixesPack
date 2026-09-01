@@ -15,6 +15,42 @@ inline bool Active()
     return mode && At<uint32_t>(mode + 0x8F0) == 1 && At<uint32_t>(mode + 0x8F4) == 1;
 }
 
+inline void CenterHealProgressInViewport(uintptr_t object, uintptr_t table)
+{
+    // The healing icon, radial progress and fill use the same native X=640
+    // anchor. In co-op that projects to the full-screen centre for P1 and to
+    // P2's left edge. Recalculate only those three leaves from their live
+    // physical viewport; their vertical SP anchor stays untouched.
+    const auto player = At<uint32_t>(object + 0x2AC);
+    const auto gfx = At<uintptr_t>(ViewportGfxPointer);
+    if (player > 1 || !gfx) return;
+
+    constexpr uintptr_t viewportBase = 0x48;
+    constexpr uintptr_t viewportStride = 0x190;
+    const auto viewport = gfx + viewportBase + player * viewportStride;
+    const auto left = At<int32_t>(viewport + 0x00);
+    const auto top = At<int32_t>(viewport + 0x04);
+    const auto right = At<int32_t>(viewport + 0x08);
+    const auto bottom = At<int32_t>(viewport + 0x0C);
+    const auto height = bottom - top;
+    if (right <= left || height <= 0) return;
+
+    const float localCenterX =
+        ((float)(left + right) * 0.5f) * 720.0f / (float)height;
+    for (uint32_t index = 0; index != 3; ++index)
+    {
+        const auto node = At<uintptr_t>(table + index * sizeof(uint32_t));
+        if (!node || At<uintptr_t>(node + 0x6C) != object ||
+            At<float>(node + 0xA4) != 330.0f) continue;
+        auto& localX = At<float>(node + 0xA0);
+        if (localX != localCenterX)
+        {
+            localX = localCenterX;
+            At<uint32_t>(node + 0x54) |= 0x10000; // invalidate native matrix cache
+        }
+    }
+}
+
 template<size_t Index> uint32_t __fastcall UpdateHud(uintptr_t object, uintptr_t)
 {
     constexpr auto def = HudClasses[Index];
@@ -34,6 +70,10 @@ template<size_t Index> uint32_t __fastcall UpdateHud(uintptr_t object, uintptr_t
             flags = next;
             At<uint32_t>(node + 0x54) |= 0x10000; // invalidate native matrix cache
         }
+    }
+    if constexpr (Index == 1)
+    {
+        if (coop) CenterHealProgressInViewport(object, table);
     }
     return result;
 }

@@ -18,6 +18,7 @@ constexpr uint32_t ModePointer = 0x157AE00;
 constexpr uint32_t ActorManager = 0x1567EAC;
 constexpr uint32_t GeometrySite = 0xE6308A;
 constexpr uint32_t InputSite = 0x98861C;
+constexpr uint32_t ViewportGfxPointer = 0x15DE88C;
 
 struct HudClass
 {

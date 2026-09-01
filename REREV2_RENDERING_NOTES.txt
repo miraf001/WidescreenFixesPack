@@ -58,6 +58,38 @@ stav se musi po kazdem pruchodu spolehlive obnovit.
 Pro titulky bylo primo ve hre overeno, ze dvojite volani v jednom snimku je
 stabilni, plynule a zobrazuje citelnou kopii v leve i prave polovine.
 
+POTVRZENY LIVE TEST: SPOLECNE TITULKY PRO JEDEN MONITOR (2026-09-01)
+-----------------------------------------------------------------
+
+Pozadavek: v side-by-side co-opu ma byt jen jedna sdilena kopie titulku ve
+stredu celeho monitoru, se stejnou vyskou, meritkem a celkovou pozici jako v
+SP. Nezapisovat do ASI pred vizualnim potvrzenim.
+
+Overena, pouze pametova zmena v bezicim Release ASI (base 0x58C80000):
+
+- fSubtitleScaleX (RVA 0x10D00C) = `spAspectFix / splitAspectFix` = 1.6;
+- fSubtitleScaleY (RVA 0x10D010) = 1.0;
+- fSubtitleOffsetX (RVA 0x139BCC) =
+  `(splitAspectFix - spAspectFix) / 2`;
+- fSubtitleOffsetY (RVA 0x139BD0) = 0.0;
+- bSubtitlePerPlayer (RVA 0x10D01C) = false.
+
+Pro aktivni 1920x1080 side-by-side layout (viewport 960x1080) vychazi
+`spAspectFix = (16/9) / ((2*viewportWidth)/viewportHeight) = 1.0`,
+`splitAspectFix = spAspectFix / 1.6 = 0.625`, tedy OffsetX = -0.1875.
+U zivatelova testu byl vysledek vizualne potvrzen jako presny. Vzorec se musi
+pri budoucim trvalem kodu pocitat z aktualni sirky a vysky viewportu, ne jako
+pevna hodnota -0.1875.
+
+Nasledujici dual-monitor test ma ponechat vsechny ctyri korekcni hodnoty vyse
+a pouze vratit bSubtitlePerPlayer na true. Existujici thread-local pruchody
+LeftOffsetX=-0.25 a RightOffsetX=+0.25 pak posunou stejny SP transform o
+polovinu sirky vlevo/vpravo, tj. do stredu kazdeho stejne sirokeho viewportu.
+Toto bylo nasledne vizualne potvrzeno: obe kopie jsou spravne umistene,
+maji spravnou vysku i stejne meritko jako potvrzena sdilena varianta. Teprve
+po dalsim rozhodnuti se tato logika prepise do zdroje za novy DualMonitorMode
+prepinac; zatim zustavaji oba vysledky jen v pameti bezici hry.
+
 HUD: ODMITNUTY POKUS A SKUTECNE VETVENI SP/MP (2026-08-30)
 ---------------------------------------------------------
 
@@ -1367,3 +1399,83 @@ FINALNI RESTARTOVY TEST POTVRZEN UZIVATELEM:
 Potvrzeni se tyka produkcni ASI bez Fridy po cistem startu hry a zahrnuje
 dosavadni celkovy testovany stav. Nasledujici rebuild muze menit pouze embedded
 Git SHA/verzi/update URL; herni hook logika musi zustat beze zmeny.
+
+LECENI: STRED IKONY A PROGRESSU VE VLASTNIM VIEWPORTU - LIVE REFERENCE 2026-09-01
+---------------------------------------------------------------------------------
+POZOR NA PRACOVNI POSTUP: dokud uzivatel explicitne nepotvrdi vizualni test,
+NEUPRAVOVAT production source ani nestavet/nedeployovat ASI. Nejprve vzdy jen
+vratny live memory test; source port az po potvrzeni obou hracu.
+
+Problem: uGUIHeal ma tri viditelne listy (ikona, kruh progressu a fill) s
+nativni kotvou localX=640, localY=330. Jejich selector5 pouziva height scale,
+takze pri 1920x1080 side-by-side vykresli X=960 pro OBA hrace: P1 je uprostred
+celeho monitoru a P2 na levem okraji sveho viewportu.
+
+Build-pinned identita a bezpecny rozsah testu:
+  uGUIHeal vtable=0139B998, update slot=vtable+24=0139B9BC.
+  Nehookovat pevnou adresu native updateru; nejprve precist AKTUALNI cil slotu
+  (v procesu PID25244 to byl permanentni ASI wrapper58C86C40) a obalit prave
+  jej. Zachova se tim dosavadni ViewportHud update.
+  Z object+F8 vzit POUZE table indexy0,1,2; kazdy musi mit node+6C==object a
+  node+A4==330.0. Zapisovat jen node+A0 a node+54|=00010000 (invalidate matrix).
+  Y, scale, opacity, flagy animace a vsechny ostatni GUI tridy nemenit.
+
+Viewport je fyzicky a musi se cist pri kazdem update:
+  gfx=*(015DE88C)
+  rect[L,T,R,B]=*(gfx+48+player*(190)); player0 je levy/P1, player1 pravy/P2.
+  canonicalX=((L+R)/2)*720/(B-T)
+  Pri 1920x1080: player0 rect0..960 -> localX320 -> fyzicke X480;
+                  player1 rect960..1920 -> localX960 -> fyzicke X1440.
+Vzorec je zavisly na live rectu, ne na pevnem offsetu; funguje i pro 16:9 a
+siroke layouty. localY=330 zustava puvodni (svisla poloha nebyla nahlasena jako
+problem).
+
+Live capture procesu PID25244 / ASI SHA256 BE851691E80096565CE8B088744B97E1195CC6773BDCA5747A72154B207DC5E6:
+  P1 controller2A6A62C0 player0, P2 controller2A655800 player1 (adresy jsou
+  pouze historicke; v novem procesu je znovu dohledat).
+  Paused diagnostika:
+    out/diagnostics/heal-progress-paused-pid25244-20260901-01.json
+    out/diagnostics/heal-p1-paused-nodes-pid25244-20260901-01.json
+    out/diagnostics/heal-p2-paused-nodes-pid25244-20260901-01.json
+  Jeden function-entry Frida wrapper bez instruction-level hooku bezpecne
+  aplikoval vyse uvedenou transformaci na vsechny tri listy obou controlleru;
+  po tisicich updatech hlasil pro kazdy controller changedLeaves=3.
+
+KOORDINACNI CHYBA: 55sekundovy test se sam odpojil drive, nez uzivatel stihl
+vizualne overit P2. Neinterpretovat to jako uplne herni potvrzeni; uzivatel
+vyslovne souhlasi s predpokladem, ze smer je spravny, ale source se zatim
+neportuje ani nestavi. Pri dalsim testu NEODPOJOVAT ani nerollbackovat, dokud
+uzivatel nenapise, ze oba hrace overil.
+
+Rollback aktualniho procesu byl rucne potvrzen: pro oba controllery indexy0..2
+jsou zpet localX=640, pak dirty +54|=00010000. Frida je odpojena; produkcni
+inspect opet hlasi frida=false. Do hry nezustal nas trvaly hook ani novy ASI.
+
+PRODUKCNI PORT LIVE POTVRZENYCH OPRAV - 2026-09-01
+---------------------------------------------------
+
+Uzivatel nasledne vyslovne schvalil port vsech dosud live testovanych oprav do
+zdroje, Release build a nasazeni pro novy herni test. Tento zaznam ma prednost
+pred drivejsim "neportovat" u titulku a leceni.
+
+- Fade: uGUIFade uz nepouziva obecny STRETCH wrapper, ale samostatny
+  FADE_STRETCH. V co-opu prepocita pouze osu Y faktorem
+  `(viewportBottom-viewportTop)/720`; X zustava na overene puvodni
+  split-screen korekci. To opravuje cerne prekryti vysoke jen 720/1080. Damage
+  overlay zustava na puvodnim STRETCH a neni tim zasažen.
+- Leceni: permanentni UpdateHud<1> po nativnim updateru najde pouze heal listy
+  indexu 0..2 s ownerem controlleru a localY=330. Nastavi jejich localX na
+  `((left+right)/2)*720/(bottom-top)` z aktualniho player viewportu a invaliduje
+  jen jejich matrix cache. Y, scale a jine GUI zustavaji nedotcene.
+- Titulky: novy `[COOP] DualMonitorMode=0` je vychozi side-by-side rezim s
+  jednou sdilenou kopii. `=1` zapne dve kopie pro dva stejne siroke monitory.
+  Render vzdy pocita `splitAspectFix=1/GetDiff()`,
+  `spAspectFix=(16/9)/fullAspect`, X scale `spAspectFix/splitAspectFix` a X
+  offset `(splitAspectFix-spAspectFix)/2`; tedy zadny pevny offset 1920x1080.
+  Hodnoty `[SUBTITLES]` jsou uz jen jemne doladeni nad touto kalibraci.
+
+Staticke overeni pred nasazenim: offline permanent co-op testy 10/10 a
+Release kompilace uspesna. Nasazeny kandidat ma SHA256
+2362E8E307E9490751E8A7F1E6C840F2B57DD92A454AB2E0F1F08637AE11CC6B.
+Rollback je pres vydani v0.1.0 SHA256
+BE851691E80096565CE8B088744B97E1195CC6773BDCA5747A72154B207DC5E6.
