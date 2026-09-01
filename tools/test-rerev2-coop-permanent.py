@@ -1,5 +1,6 @@
 """Test production C++-generated x86 offline; NEVER open the game process."""
 import argparse
+import hashlib
 import importlib.util
 from pathlib import Path
 import struct
@@ -34,6 +35,15 @@ GPRS = [getattr(x, 'UC_X86_REG_' + r) for r in ('EAX','EBX','ECX','EDX','ESI','E
 XMMS = [getattr(x, 'UC_X86_REG_XMM' + str(i)) for i in range(8)]
 CLASSES = ((0x139AE20, (0, 4)), (0x139B998, (3, 4)), (0x139BAF0, (0,)),
            (0x139B558, (2,)), (0x13A3868, (0,)))
+CONFIRMED_INVENTORY_BLOB_SHA256 = '65664751cdb34abae26e9f9b2b9b7c0b9c6521fd11950b8e88b1bf22d8da31c0'
+CONFIRMED_INVENTORY_EXPORTS = {
+    '_InventoryDraw': 0,
+    '_InventoryUpdate': 69,
+    '_InventorySizeStandard': 90,
+    '_InventorySizeAlternate': 117,
+    '_CorrectInventoryRoot': 146,
+    '_CorrectPreview': 536,
+}
 
 def machine():
     uc = Uc(UC_ARCH_X86, UC_MODE_32)
@@ -49,11 +59,9 @@ def machine():
 class Tests(unittest.TestCase):
     def test_inventory_production_blobs_equal_confirmed_live_implementation(self):
         menu, config = 0x2100000, 0x2105000
-        safe, exports, object_hash = inventory.load_template(
-            ROOT / 'out/runtime/inventory-adaptive-centered-release-live-pid22248-20260901-01.json',
-            980.0, 650.0)
-        self.assertEqual(object_hash, inventory.CONFIRMED_TEMPLATE_HASH)
-        self.assertEqual(BLOBS['inventorySafe'], safe)
+        safe = BLOBS['inventorySafe']
+        exports = CONFIRMED_INVENTORY_EXPORTS
+        self.assertEqual(hashlib.sha256(safe).hexdigest(), CONFIRMED_INVENTORY_BLOB_SHA256)
         self.assertEqual(BLOBS['inventoryBound'], inventory.bind(safe, config))
         expected_config = inventory.centered_config_bytes(
             inventory.config_bytes(core=0x12345678))
