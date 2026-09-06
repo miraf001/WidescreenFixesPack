@@ -21,6 +21,7 @@ float fSubtitleScaleX = 1.0f;
 float fSubtitleScaleY = 1.0f;
 float fSubtitleLeftOffsetX = -0.25f;
 float fSubtitleRightOffsetX = 0.25f;
+bool bDualMonitorMode = false;
 bool bSubtitlePerPlayer = false;
 
 #if _DEBUG
@@ -169,6 +170,11 @@ static IDirect3DPixelShader9* g_wmvYuvDecodePixelShader = nullptr;
 static IDirect3DVertexShader9* g_myScreenVertexShader = nullptr;
 static thread_local float gSubtitlePassTranslationXNdc = 0.0f;
 static thread_local float gSubtitlePassOffsetX = 0.0f;
+// Only the second, replayed dual-monitor pause-menu pass sets this. Keeping it
+// thread-local avoids touching a controller's native position while another
+// GUI worker might be reading it.
+static thread_local float gDualGuiPassTranslationXNdc = 0.0f;
+static volatile LONG gActivePauseCommonMenu = 0;
 
 void LoadHudTuningFromIni()
 {
@@ -179,7 +185,7 @@ void LoadHudTuningFromIni()
     fHudScaleY = iniReader.ReadFloat("HUD", "ScaleY", 1.0f);
     // Story subtitles are calibrated from the live full canvas in the renderer.
     // These INI values are deliberately only fine-tuning multipliers/offsets.
-    const bool dualMonitorMode =
+    bDualMonitorMode =
         iniReader.ReadInteger("COOP", "DualMonitorMode", 0) != 0;
     fSubtitleOffsetX = iniReader.ReadFloat("SUBTITLES", "OffsetX", 0.0f);
     fSubtitleOffsetY = iniReader.ReadFloat("SUBTITLES", "OffsetY", 0.0f);
@@ -189,12 +195,12 @@ void LoadHudTuningFromIni()
         iniReader.ReadFloat("SUBTITLES", "LeftOffsetX", -0.25f);
     fSubtitleRightOffsetX =
         iniReader.ReadFloat("SUBTITLES", "RightOffsetX", 0.25f);
-    bSubtitlePerPlayer = dualMonitorMode;
+    bSubtitlePerPlayer = bDualMonitorMode;
     DBGONLY(spd::log()->info(
         "[TUNING] HUD offset=({}, {}) scale=({}, {}); subtitles "
         "dualMonitor={} perPlayer={} offset=({}, {}) playerX=({}, {}) scale=({}, {})",
         fHudOffsetX, fHudOffsetY, fHudScaleX, fHudScaleY,
-        dualMonitorMode, bSubtitlePerPlayer,
+        bDualMonitorMode, bSubtitlePerPlayer,
         fSubtitleOffsetX, fSubtitleOffsetY,
         fSubtitleLeftOffsetX, fSubtitleRightOffsetX,
         fSubtitleScaleX, fSubtitleScaleY);)
@@ -478,12 +484,23 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
                             spAspectFix / splitAspectFix;
                         const float automaticOffsetX =
                             (splitAspectFix - spAspectFix) * 0.5f;
+                        // The live 3840x1080 calibration exposed one more
+                        // full-canvas correction which is proportional to the
+                        // actual aspect, not to a particular monitor width.
+                        // At 3840x1080 these evaluate to ScaleX=2.5 and
+                        // OffsetX=-0.0625 -- the visually confirmed values.
+                        constexpr float subtitleScalePerAspect = 45.0f / 64.0f;
+                        const float dynamicSubtitleScaleX =
+                            (screenWidth / screenHeight) * subtitleScalePerAspect;
+                        const float dynamicSubtitleOffsetX =
+                            -2.0f * screenHeight / (9.0f * screenWidth);
                         const float offsetX = screenWidth *
-                            (automaticOffsetX + fSubtitleOffsetX +
-                             gSubtitlePassOffsetX);
+                            (automaticOffsetX + dynamicSubtitleOffsetX +
+                             fSubtitleOffsetX + gSubtitlePassOffsetX);
                         const float offsetY = screenHeight * fSubtitleOffsetY;
                         v13[0] = v14 * v4 * splitAspectFix *
-                            automaticScaleX * fSubtitleScaleX;
+                            automaticScaleX * dynamicSubtitleScaleX *
+                            fSubtitleScaleX;
                         v13[1] = v15 * v5 * fSubtitleScaleY;
                         v13[2] = (v14 * (v6 + offsetX)) - splitAspectFix +
                             gSubtitlePassTranslationXNdc;
@@ -519,6 +536,12 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
                 v13[2] = (float)(v14 * v6) - (1.0f / GetDiff());
                 v13[3] = (float)(v15 * v7) + 1.0f;
             }
+
+            // The dual-monitor pause wrappers replay an otherwise native
+            // full-canvas GUI transform. Move only their second draw in NDC;
+            // no controller coordinates or cached layout data are mutated.
+            if (edx == RESCALE && gDualGuiPassTranslationXNdc != 0.0f)
+                v13[2] += gDualGuiPassTranslationXNdc;
 
             DBGONLY({
                 if (edx == SUBTITLES)
@@ -1087,6 +1110,149 @@ void __fastcall sub_E18040_rescale(int _this, int edx, int a2)
     return sub_E18040(_this, RESCALE, a2);
 }
 
+// All three duplicated pause elements are native full-canvas GUI controllers.
+// The checks below deliberately identify their *semantic* pause relationship,
+// rather than retaining any heap address discovered during a live session.
+static bool IsActiveFullCanvasGui(uintptr_t object, uintptr_t drawSlot)
+{
+    constexpr uintptr_t drawSlotFromVtable = 0x58;
+    constexpr uintptr_t guiRootOffset = 0xF4;
+    constexpr uintptr_t rootOwnerOffset = 0x6C;
+    constexpr uintptr_t guiStateFlagsOffset = 0x148;
+    constexpr uintptr_t cachedBoundsOffset = 0x168;
+    constexpr uint32_t enabledAndVisibleMask = 0x201;
+
+    if (!object || drawSlot < drawSlotFromVtable ||
+        IsBadReadPtr(reinterpret_cast<void*>(object), cachedBoundsOffset + 16))
+    {
+        return false;
+    }
+
+    const auto expectedVtable = drawSlot - drawSlotFromVtable;
+    if (*reinterpret_cast<uintptr_t*>(object) != expectedVtable)
+        return false;
+
+    const auto root = *reinterpret_cast<uintptr_t*>(object + guiRootOffset);
+    if (!root || IsBadReadPtr(
+            reinterpret_cast<void*>(root + rootOwnerOffset), sizeof(uintptr_t)) ||
+        *reinterpret_cast<uintptr_t*>(root + rootOwnerOffset) != object)
+    {
+        return false;
+    }
+
+    if ((*reinterpret_cast<uint32_t*>(object + guiStateFlagsOffset) &
+         enabledAndVisibleMask) != enabledAndVisibleMask)
+    {
+        return false;
+    }
+
+    const auto* bounds = reinterpret_cast<const int32_t*>(object + cachedBoundsOffset);
+    return bounds[0] == 0 && bounds[1] == 0 &&
+        bounds[2] == GetResX() && bounds[3] == GetResY();
+}
+
+static bool IsPauseCommonMenu(uintptr_t object)
+{
+    return IsActiveFullCanvasGui(object, uGUICommonMenu);
+}
+
+static bool IsPausePurpose(uintptr_t object)
+{
+    constexpr uintptr_t previousControllerOffset = 0x18;
+    if (!IsActiveFullCanvasGui(object, uGUIPurpose) ||
+        IsBadReadPtr(reinterpret_cast<void*>(object + previousControllerOffset),
+            sizeof(uintptr_t)))
+    {
+        return false;
+    }
+
+    return IsPauseCommonMenu(
+        *reinterpret_cast<uintptr_t*>(object + previousControllerOffset));
+}
+
+static uintptr_t GetActivePauseCommonMenu()
+{
+    return static_cast<uintptr_t>(
+        InterlockedCompareExchange(&gActivePauseCommonMenu, 0, 0));
+}
+
+static bool IsDualMonitorPauseReplayActive()
+{
+    return bDualMonitorMode && IsSplitScreenActive() && GetResX() > 0 &&
+        GetCurrentSplitScreenResX() > 0;
+}
+
+static float GetDualMonitorPassTranslationXNdc()
+{
+    // NDC spans two units horizontally. This remains correct for every
+    // equal-width two-monitor canvas (including fake presenter resolutions).
+    return 2.0f * static_cast<float>(GetCurrentSplitScreenResX()) /
+        static_cast<float>(GetResX());
+}
+
+static void RenderPauseGuiForDualMonitors(int object, int edx, int a2)
+{
+    sub_E18040_rescale(object, edx, a2);
+    if (!IsDualMonitorPauseReplayActive())
+        return;
+
+    const auto originalTranslation = gDualGuiPassTranslationXNdc;
+    gDualGuiPassTranslationXNdc = originalTranslation +
+        GetDualMonitorPassTranslationXNdc();
+    sub_E18040_rescale(object, edx, a2);
+    gDualGuiPassTranslationXNdc = originalTranslation;
+}
+
+void __fastcall sub_E18040_pause_common_menu(int _this, int edx, int a2)
+{
+    const auto object = static_cast<uintptr_t>(_this);
+    if (!IsPauseCommonMenu(object))
+    {
+        if (GetActivePauseCommonMenu() == object)
+            InterlockedExchange(&gActivePauseCommonMenu, 0);
+        return sub_E18040_rescale(_this, edx, a2);
+    }
+
+    InterlockedExchange(&gActivePauseCommonMenu, static_cast<LONG>(object));
+    return RenderPauseGuiForDualMonitors(_this, edx, a2);
+}
+
+void __fastcall sub_E18040_pause_purpose(int _this, int edx, int a2)
+{
+    if (!IsPausePurpose(static_cast<uintptr_t>(_this)))
+        return sub_E18040_rescale(_this, edx, a2);
+
+    return RenderPauseGuiForDualMonitors(_this, edx, a2);
+}
+
+void __fastcall sub_E18040_pause_guide(int _this, int edx, int a2)
+{
+    const auto object = static_cast<uintptr_t>(_this);
+    if (!IsActiveFullCanvasGui(object, uGUIGuide) ||
+        !IsPauseCommonMenu(GetActivePauseCommonMenu()))
+    {
+        return sub_E18040_rescale(_this, edx, a2);
+    }
+
+    return RenderPauseGuiForDualMonitors(_this, edx, a2);
+}
+
+static bool InstallDualMonitorPauseGui()
+{
+    constexpr uintptr_t nativeRescaleEntry = 0x00E18040;
+    constexpr uintptr_t drawSlots[] = { uGUICommonMenu, uGUIPurpose, uGUIGuide };
+    for (const auto drawSlot : drawSlots)
+    {
+        if (*reinterpret_cast<uintptr_t*>(drawSlot) != nativeRescaleEntry)
+            return false;
+    }
+
+    injector::WriteMemory(uGUICommonMenu, sub_E18040_pause_common_menu, true);
+    injector::WriteMemory(uGUIPurpose, sub_E18040_pause_purpose, true);
+    injector::WriteMemory(uGUIGuide, sub_E18040_pause_guide, true);
+    return true;
+}
+
 void __fastcall sub_E18040_stretch(int _this, int edx, int a2)
 {
     return sub_E18040(_this, STRETCH, a2);
@@ -1525,6 +1691,15 @@ void Init()
     injector::WriteMemory(uGUICommandBase, sub_E18040, true);
     injector::WriteMemory(uGUICommandFar, sub_E18040_offset, true);
     injector::WriteMemory(uGUICommandNear, sub_E18040, true);
+
+    // Keep the existing single-monitor pause path byte-for-byte native: these
+    // three class slots are replaced only during a DualMonitorMode=1 startup.
+    // A later F5 reload may disable replay safely, but enabling it requires a
+    // restart so the guarded vtable wrappers can be installed.
+    if (bDualMonitorMode)
+        rev2coop::Report(InstallDualMonitorPauseGui()
+            ? "[DUAL] Pause menu, purpose and guide duplicated for the right monitor"
+            : "[DUAL] Pause duplication skipped: native GUI draw-slot guard failed");
 
     if (bDisableDamageOverlay)
     {

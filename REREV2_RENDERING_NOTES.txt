@@ -1497,3 +1497,154 @@ ale pred opravou cetl sdileny GUI origin0. Pokusy o globalni localX=960 nebo
 o translaci rodicu sice vyrobily physicalX=1440, ale byly orezany; nepatri do
 production kodu. Finalni vzorec cte aktualni live viewport/context, proto nema
 pevny offset 1920x1080 a pokryva i jinou sirku/rozliseni.
+
+DUAL-MONITOR TITULKY A PAUSE UI: LIVE POTVRZENO, ZDROJOVY PORT 2026-09-06
+-------------------------------------------------------------------------
+
+Pracovni stav pred portem:
+
+- hra bezela s Fakefinity presenterem jako spojene platno 3840x1080;
+  split viewporty byly 1920x1080 + 1920x1080. Stejny postup ma fungovat se
+  dvema fyzickymi monitory stejneho rozliseni;
+- vsechny zde popsane vysledky byly nejdrive zkontrolovany pouze vratnymi
+  native/live-memory wrappery. Uzivatel je potom sam vizualne potvrdil;
+- teprve po tomto potvrzeni uzivatel vyzval k portu do ASI, Release buildu a
+  nasazeni. Nikdy nepouzivat historicke PID, heap adresy controlleru ani live
+  alokace z `out/runtime/` v dalsim procesu.
+
+1. STRIKTNI ROZDELENI REZIMU
+
+`[COOP] DualMonitorMode=0` je bezpecny vychozi one-monitor side-by-side rezim:
+
+- je jen jedna spolecna kopie titulku uprostred cele fyzicke obrazovky;
+- pause menu zustava jedna nativni kopie vlevo; nove pause draw-slot hooky se
+  pri startu vubec NEINSTALUJI;
+- proto tato zmena nema menit ani duplikovat pause GUI v single rezimu.
+
+`DualMonitorMode=1` je rezim pro dve stejne siroke poloviny jednoho spojeneho
+platna:
+
+- titulky se kresli dvakrat, po jedne kopii ve stredu kazdeho viewportu;
+- pause menu, aktualni ukol a dolni contextualni napoveda/kontrolky se
+  bezpecne prehravaji i do praveho viewportu;
+- rezim je zvolen pri startu. F5 muze uz nainstalovany dual wrapper bezpecne
+  vypnout (druhy pass se preskoci), ale jeho zapnuti z procesu, ktery zacal s
+  `=0`, vyzaduje restart, protoze se zamerne neprepisuji vtable za behu.
+
+2. TITULKY
+
+Predchozi 1920x1080 korekce nestacila na ultra-wide full canvas. Finalni live
+kalibrace v 3840x1080 mela v nahranem ASI tyto dodatecne hodnoty:
+
+- `fSubtitleScaleX = 2.5`;
+- `fSubtitleScaleY = 1.0`;
+- `fSubtitleOffsetX = -0.0625`;
+- `fSubtitleOffsetY = 0.0`;
+- `bSubtitlePerPlayer = true` pouze pro dual rezim.
+
+Tyto hodnoty se do zdroje NESMI psat jako konstanty pro 3840x1080. Trvaly
+renderer je odvozuje z aktualniho celeho platna `W x H`:
+
+    dynamicSubtitleScaleX  = W / 1536 = (W/H) * 45/64
+    dynamicSubtitleOffsetX = -2*H / (9*W) = -2 / (9*aspect)
+
+Pak se aplikuje puvodni live-canvas rekonstrukce:
+
+    splitAspectFix   = 1 / GetDiff()
+    spAspectFix      = (16/9) / fullAspect
+    automaticScaleX  = spAspectFix / splitAspectFix
+    automaticOffsetX = (splitAspectFix - spAspectFix) / 2
+
+`[SUBTITLES] ScaleX/ScaleY/OffsetX/OffsetY` zustavaji jen jako jemne dodatecne
+doladeni. `LeftOffsetX=-0.25` a `RightOffsetX=+0.25` zustavaji relativni ke
+spojenemu platnu, tedy stale 25 % a 75 % sirky pri dvou stejne sirokych
+viewpotech. To neni pevny 1920px offset.
+
+Uzel `uGUITextVoice` se nikdy neklonuje: stejna hotova native geometrie se
+prehrava dvakrat se dvema `thread_local` subtitle offsety. Live test potvrdil:
+
+- `DualMonitorMode=1`: dve kopie, spravna vyska/scale a stred kazde poloviny;
+- `DualMonitorMode=0`: jedna kopie uprostred cele fyzicke obrazovky;
+- prepnuti dual -> shared -> dual bylo v live testu spravne. Je vsak stale
+  vhodne po produkcnim buildu tyto dva rezimy zkontrolovat i pri dalsich
+  rozlisenich.
+
+3. PAUSE MENU DUPLIKACE (POUZE DUAL)
+
+Live testy prokazaly, ze se nesmi klonovat controller ani trvale posouvat
+`controller+0x40`: nativni data jsou sdilena a puvodni souradnice musi zustat
+nedotcene. Spravny permanentni postup je:
+
+1. Nechat nativni `sub_E18040_rescale` vykreslit levou/originalni kopii.
+2. Jen pro druhy pass pridat do generovane X transformace
+   `2 * currentSplitWidth / fullCanvasWidth` v NDC. Pro 3840/1920 je to 1.0,
+   ale vzorec je dynamicky.
+3. Hodnotu drzet v `thread_local gDualGuiPassTranslationXNdc` a hned po
+   druhem draw vratit. Nezapisovat souradnice controlleru, cache bounds ani
+   globalni viewport/scissor.
+
+Povolen je jen active, full-canvas controller s vlastnim nativnim render rootem:
+
+    object vtable               == drawSlot - 0x58
+    root                        == *(object + 0xF4)
+    *(root + 0x6C)              == object
+    (*(object + 0x148) & 0x201) == 0x201
+    cached bounds object+0x168  == { 0, 0, GetResX(), GetResY() }
+
+Takto se overuji pouze tyto tri class draw sloty:
+
+- `uGUICommonMenu`, slot `0x013950C8`: vlastni leve pause menu;
+- `uGUIPurpose`, slot `0x0139BC88`: aktualni ukol vpravo nahore. Navic musi
+  jeho `previous` link na `object+0x18` ukazovat na validni aktivni
+  `uGUICommonMenu`;
+- `uGUIGuide`, slot `0x01399E68`: dolni popis volby a `F Confirm / Esc Close`.
+  Navic musi existovat znovu overeny aktivni pause CommonMenu zaznamenany z
+  jeho vlastniho draw passu.
+
+Tato semanticka kontrola je zasadni: brani duplikaci jinych Guide/Purpose GUI
+a neodkazuje na adresu zadne konkretni co-op session. Pred zapsanim do zdroje
+uzivatel potvrdil vsechny tri prave kopie jako spravne zobrazene a stabilni.
+
+4. REPRODUKOVATELNE LIVE TESTY A ROLLBACK
+
+Pomocne, neprodukcni testy jsou ponechany v `tools/`:
+
+- `test-rerev2-common-menu-native-live.py` pro persistentni native wrapper
+  `uGUICommonMenu`;
+- `test-rerev2-specific-gui-double-draw-native-live.py` pro jeden presne
+  zvoleny Purpose/Guide controller;
+- `test-rerev2-common-menu-double-draw.py` pro drivejsi casove omezeny Frida
+  experiment.
+
+Tyto skripty nikdy nesmi byt pouzity na nove PID se starym state JSON. Live
+wrapper se po ukonceni hry sam zahodi; source port je jediny zamysleny trvaly
+mechanismus. Pokud by dual pause UI bylo problematicke, vratit
+`DualMonitorMode=0` a restartovat hru: source nema v single rezimu nove
+prepsane pause draw sloty.
+
+5. NASLEDUJICI POVINNY HERNI TEST PO BUILDU
+
+1. S `DualMonitorMode=1` na spojene plose zkontrolovat titulky i vsechny tri
+   pause oblasti vlevo a vpravo.
+2. Ukoncit hru, nastavit `DualMonitorMode=0`, znovu spustit a overit presne
+   jednu stredovou kopii titulku a presne jedno leve native pause menu.
+3. Pokud oba testy projdou, commitnout a pushnout pripraveny Release ASI na
+   GitHub. Do te doby zmenu neoznacovat jako produkcne definitivni pro vsechna
+   rozliseni.
+
+FINALNI HERNI POTVRZENI A VYDANI v0.1.2 - 2026-09-07
+------------------------------------------------------
+
+Uzivatel na novem Release ASI provedl oba povinne restartove testy a potvrdil:
+"Vse se zda byt v poradku, jsem spokojen s dual screen rezimem i single
+screen." Tim je pro tento build potvrzeno:
+
+- `DualMonitorMode=1`: titulky a tri duplikovane pause oblasti jsou spravne
+  na obou 1920x1080 polovinach 3840x1080 Fakefinity canvasu;
+- `DualMonitorMode=0`: zustava pouze jedna sdilena kopie titulku a jedno
+  nativni pause menu, tedy single-screen rozdeleni nebylo naruseno;
+- mechanizmus je pripraven jako verze `0.1.2` k pushi do focused GitHub forku.
+
+Do balicku a repozitare patri vychozi INI s `DualMonitorMode=0`. Herni INI byl
+pro dual test docasne nastaven na `=1`; pred beznym one-monitor hranim jej
+vratit na `=0` a hru restartovat.
