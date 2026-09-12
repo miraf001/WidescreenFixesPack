@@ -1648,3 +1648,1299 @@ screen." Tim je pro tento build potvrzeno:
 Do balicku a repozitare patri vychozi INI s `DualMonitorMode=0`. Herni INI byl
 pro dual test docasne nastaven na `=1`; pred beznym one-monitor hranim jej
 vratit na `=0` a hru restartovat.
+
+DUAL MONITOR: NATIVNI LEVA SP POLOVINA + ZRCADLENI - LIVE POTVRZENO 2026-09-08
+-------------------------------------------------------------------------------
+
+Stav tohoto zaznamu:
+
+- uzivatel vizualne potvrdil bez jedine nalezene chyby main menu i rozehrany
+  non-split SP gameplay nejprve bez zrcadleni a potom i s aktivnim zrcadlenim;
+- potvrzeny test bezel pouze v pameti procesu. Production source, INI, ASI ani
+  Fakefinity nebyly touto opravou zmeneny;
+- aktualni process-bound test zustava aktivni pri psani poznamky a ceka na
+  overeni prechodu do skutecneho co-op split screenu;
+- reprodukcni skript je ignorovany soubor
+  `out/runtime/test-rerev2-dual-sp-native-left-mirror.py` s volbami
+  `--coherent-logical-half --preserve-layout-cache`; bez `--no-mirror` je
+  zrcadleni aktivni. Pro finalni source port z nej neprebirat historicke PID,
+  COM pointery ani heap adresy.
+
+CIL A DYNAMICKA GEOMETRIE
+
+Pro fyzicky D3D9 canvas `W x H`, kde W je sude:
+
+    leftViewport  = { left=0, top=0, right=W/2, bottom=H }
+    logicalWidth  = W/2
+    logicalHeight = H
+
+Nejde o crop prostredni casti puvodniho ultra-wide obrazu ani o zmenseni
+hotoveho `W x H` snimku do poloviny. Hra musi nativne sestavit single-view
+scenu, projekci, HUD, menu a mouse transform pro viewport `W/2 x H`. Teprve
+hotova leva oblast `0..W/2` se kopiruje pixelove 1:1 do prave oblasti
+`W/2..W`. Pri 3840x1080 je vysledek dvakrat 1920x1080, ale v mechanismu neni
+pevna konstanta 1920 ani 3840.
+
+PROKAZANA SLEPA VETEV: PROC SE 3D OBRAZ HORIZONTALNE MACKAL
+
+Nesmime trvale zapisovat polovinu do `renderer+0xB8`. Pri pokusu s persistentni
+hodnotou 1920 na fyzickem 3840x1080 canvasu zacala hra znovu pulit i viewporty
+svych internich render targetu, napr. target 1920x540 dostal viewport 960x540.
+Vysledkem nebyl pouze mensi obraz, ale dalsi horizontalni komprese a chybny
+aspect ratio. Tato chyba je podstatna: "redukce viewportu" nesmi znamenat
+smrsknuti hotoveho wide renderu.
+
+Finalni live reseni proto po kratkem synchronnim native-layout callu vzdy
+vrati/udrzuje:
+
+    renderer+0xB8 = W
+    renderer+0xBC = H
+
+Fyzicky renderer a jeho resource rozmery zustavaji plne. Polovicni je cilovy
+single-view screen rect a logicka sirka pro FusionFix GUI/FOV/input, nikoliv
+globalni renderer cache.
+
+NATIVNI SESTAVENI LEVEHO SINGLE-VIEW LAYOUTU
+
+Overene adresy pro tento build rerev2.exe:
+
+    split controller pointer = *(0x0157AE00)
+    native mode              = controller+0x8F4
+    graphics                 = *(0x015DE88C)
+    renderer                 = *(0x015E0388)
+    native updateLayout      = 0x004AE570 (thiscall, ECX=graphics)
+    native SP rect converter = 0x004AC310
+    SP converter call/return = 0x004AE831 / 0x004AE836
+    screen0 rect             = graphics+0x48
+    screen1/fallback rect    = graphics+0x1D8
+    active rect              = graphics+0xD20
+    layout dirty byte        = graphics+0xD0C
+    cached native mode       = graphics+0xCE0
+
+V non-split stavu (`controller+0x8F4 != 1`) se layout sestavi jednim
+synchronnim volanim:
+
+1. Ulozit skutecny manager mode a plne renderer W/H.
+2. Jen po dobu volani nastavit manager mode na 2. Mode 2 je nativni single-view
+   vetev v `0x004AE570`.
+3. Jen po dobu tohoto volani dat `renderer+0xB8=W/2`, `+0xBC=H`, nastavit
+   `graphics+0xD0C=1` a zavolat `updateLayout(graphics)`.
+4. Pri presnem converter callu s return address `0x004AE836` a logickym rectem
+   `{0,0,1280,720}` pouzit active rect `{0,0,W/2,H}`. V overenem testu ho uz
+   stejny docasny renderer rozmer sestavil nativne; guard callsite/logickeho
+   rectu zustava nutny, aby se nezasahlo do jinych konverzi.
+5. Ihned vratit `renderer+0xB8/+0xBC` na fyzicke W/H a manager mode na jeho
+   skutecnou hodnotu. Mode 2 nesmi zustat globalne aktivni.
+6. Kriticky krok: `updateLayout` na konci ulozi docasny mode 2 do
+   `graphics+0xCE0`. Po navratu manageru na mode 0 je proto nutne zapsat do
+   `graphics+0xCE0` skutecny puvodni mode. Bez toho per-frame volani z
+   `0x0042B149` hned v dalsim snimku zjisti nesoulad cache a obnovi full-width
+   layout. Prave toto zpusobovalo, ze drivejsi dobry posun ihned mizel.
+
+Po tomto postupu je potvrzeny stabilni stav na 3840x1080:
+
+    renderer logical = 3840x1080 (PLNA FYZICKA SIRKA)
+    active rect       = {0,0,1920,1080}
+    screen0 rect      = {0,0,1920,1080}
+    split manager     = 0
+
+Pokud hra pri zmene sceny/menu nativni screen0 prepise, Present-side state
+machine znovu zavola stejnou synchronni proceduru. Nikdy pouze naslepo
+neprepisovat screen0 rect kazdy frame; layout musi projit nativni konstrukci,
+aby spolu souhlasily 3D projekce, GUI, HUD a input.
+
+LOGICKA SIRKA PRO FUSIONFIX GUI, FOV A MYS
+
+Loaded ASI ma pro tento build overene cache na module RVA:
+
+    FusionFix ResX = ASI base + 0x183860
+    FusionFix ResY = ASI base + 0x183864
+
+V potvrzenem non-split dual fallback testu se udrzuje:
+
+    FusionFix ResX = W/2
+    FusionFix ResY = H
+
+Soucasne se screen1/fallback record `graphics+0x1D8` vystavuje jako
+`{0,0,W/2,H}`, protoze jeho right/bottom (`+0x1E0/+0x1E4`) jsou nativni
+fallback rozliseni pouzivane mimo skutecny split. Toto je duvod, proc po nove
+oprave nejen grafika, ale i leve mouse hit-testy, menu, HUD a FOV odpovidaly
+stejnemu 16:9 prostoru. Fusion cache se pri skutecnem splitu musi vratit na
+plne W/H.
+
+FINALNI ZRCADLENI HOTOVEHO SNIMKU
+
+Zrcadleni se provadi tesne pred `IDirect3DDevice9::Present`, pouze kdyz neni
+aktivni skutecny split (`controller+0x8F4 != 1`):
+
+1. Z backbufferu zkopirovat source rect `{0,0,W/2,H}` do docasneho render
+   targetu o rozmeru `W/2 x H` pres `StretchRect` s point filtrem (`D3DTEXF_NONE`).
+   Intermediate target je nutny kvuli bezpecnemu kopirovani v ramci stejneho
+   backbufferu bez prekryvajicich se source/destination oblasti.
+2. Intermediate zkopirovat 1:1 zpet do `{0,0,W/2,H}`.
+3. Stejny intermediate zkopirovat 1:1 do `{W/2,0,W,H}`.
+
+Live potvrzeni hlasilo stovky az tisice `mirrorCopies` a
+`lastCopyError=0`. Uzivatel potvrdil main menu i SP gameplay jako perfektni,
+bez viditelne chyby. Kopie je dynamicka podle aktualniho backbufferu a
+nezavisi na Fakefinity; stejny princip ma platit pro Eyefinity, Surround nebo
+jiny spojeny canvas se dvema stejne sirokymi monitory.
+
+SPLIT PRECHOD, OCEKAVANE CHOVANI A ROLLBACK
+
+State machine musi na kazdem Present cist skutecny native split stav:
+
+- non-split: udrzovat vyse popsany native left layout + logical W/2 a zrcadlit;
+- vstup do skutecneho splitu (`mode==1`): ihned obnovit Fusion W/H a native
+  full-canvas fallback, prestat zrcadlit a nechat stavajici potvrzeny P1/P2
+  co-op layout bez dalsi zmeny;
+- vystup ze splitu: znovu sestavit nativni levou single-view polovinu a obnovit
+  zrcadleni.
+
+Pred odpojenim live testu je nutne:
+
+1. odpojit converter hook, aby rollback nebyl znovu transformovan;
+2. obnovit renderer W/H, Fusion ResX/ResY a screen1/fallback full rect;
+3. nastavit dirty byte a zavolat native `updateLayout` se skutecnym mode;
+4. overit full non-split baseline: active rect `{W/4,0,3W/4,H}` pro nativni
+   16:9 fit na dvojnasobne sirokem canvasu a screen0/screen1 `{0,0,W,H}`;
+5. teprve potom odpojit Present hook a uvolnit COM surface reference.
+
+BEZPECNOST FRIDA TESTU
+
+Behem vyvoje spadla hra v `frida-agent.dll` s BEX/c0000409, kdyz byly do
+stejneho procesu soucasne pripojene dva Frida skripty a jeden se odpojoval.
+Nejde o prokazanou chybu renderer logiky. Dalsi live testy proto provadet
+jednim Frida session/agentem; pripadne D3D telemetry integrovat do stejneho
+skriptu. Nepoustet paralelni `rerev2-d3d9-frame-map.py` vedle aktivniho
+mutation testu.
+
+DODATEK: OPRAVA P2 PRI PRECHODU DO SPLITU + F7 BRIDGE PULSE - 2026-09-08
+-------------------------------------------------------------------------------
+
+Prvni live prechod ze zrcadleneho non-split stavu do skutecneho co-opu
+spravne zastavil Present kopie, ale P2 se vykresloval pres cely 3840x1080
+canvas. Telemetrie presne ukazala:
+
+    splitActive = true
+    screen0      = {0,0,1920,1080}
+    screen1      = {0,0,3840,1080}       // CHYBNE
+
+Pricinou nebyl native co-op layout ani drivejsi production ASI. Chyba byla
+pouze v live state machine: funkce `applyFullLogicalState()` se volala na
+KAZDEM Presentu ve split vetvi. Spravne vracela renderer a FusionFix cache na
+plne W/H, ale zaroven kopirovala ulozeny non-split screen1/fallback rect
+`{0,0,W,H}` pres nativni P2 rect. Proto byla leva polovina P2 obrazu schovana
+za P1 viewportem.
+
+Potvrzeny smer opravy je striktne oddelit dve operace:
+
+1. `restoreFullLogicalCaches()` obnovuje jen:
+
+       renderer+0xB8/+0xBC = W/H
+       FusionFix ResX/ResY  = W/H
+
+   Muze bezet kazdy split Present a NESMI zapisovat screen0 ani screen1.
+
+2. Pri hrane non-split -> split se jednou obnovi fyzicky fallback record,
+   nastavi `graphics+0xD0C=1` a zavola native `updateLayout` se skutecnym
+   manager mode 1. Od te chvile oba screen sloty vlastni nativni co-op layout;
+   state machine se jich v dalsich split snimcich nedotyka.
+
+3. Take attach do jiz aktivniho splitu se musi povazovat za vstupni hranu a
+   jednou layout obnovit. To napravi pripadny stav po predchozim odpojenem
+   experimentu.
+
+Po oprave je stabilni stav:
+
+    splitActive  = true
+    renderer     = 3840x1080
+    Fusion cache = 3840x1080
+    screen0      = {0,0,1920,1080}
+    screen1      = {1920,0,3840,1080}    // SPRAVNE
+    mirrorCopies = konstantni            // zrcadleni ve splitu stoji
+
+Uzivatel po teto oprave oznacil split obraz za "mnohem lepsi". Plny opakovany
+prechodovy test bude nasledovat s novou F7 bridge hotkey; do production source
+render opravu stale neportovat pred jeho finalnim potvrzenim.
+
+Pro rychle opakovani prechodu byl samostatne rozsiren bridge:
+
+    [BRIDGE] DisconnectSeconds = 2.0
+    [HOTKEYS] PulseDisconnect  = F7
+
+F7 zachova aktualni F9 capture/release volbu, zastavi demo, vycisti vsechny
+drzene vstupy a pozada updater thread o fyzicke `vigem_target_remove` obou
+virtualnich Xbox 360 targetu. Po dynamicky nastavene dobe stejny updater thread
+znovu provede `vigem_target_add`, neutralni update a vypise nove XInput sloty.
+Add/remove se nikdy neprovadi v low-level keyboard callbacku, aby se nepotkal
+s `pad.update()`. Opakovany stisk F7 prodlouzi interval od okamziku posledniho
+stisku. Vychozi 2.0 s je v INI a validni rozsah je 0.25..10 s.
+
+Bridge zmena je v `tools/gamepad_bridge.py`, vychozi konfigurace v
+`data/ResidentEvilRevelations2.FusionFix/gamepad-bridge.ini` a popis v
+`DEVELOPMENT.md`. Offline sada `tools/test-gamepad-demo.py` po zmene prosla
+9/9 bez vytvoreni virtualniho zarizeni. Stary bridge PID4748 byl korektne
+ukoncen; nova instance PID33692 startovala s `--start-released` a ohlasila
+bridge pad1=XInput slot0, pad2=slot1. PIDy jsou pouze historicke.
+
+FIXED HUD KEY PROMPT uGUIActionIcon2 V CO-OPU - LIVE POTVRZENO 2026-09-08
+-------------------------------------------------------------------------------
+
+Uzivatel rozlisil dva nezavisle prompt systemy:
+
+- `uGUIActionIcon` je world-attached prompt nad objektem (napr. F nad klicem).
+  Ten fungoval spravne od zacatku a NESMI byt touto opravou menen.
+- `uGUIActionIcon2` je pevny HUD prompt u spodku obrazu (napr. E/X). V SP byl
+  spravny, v co-opu byl puvodne mimo obraz. Prvni layout oprava jej zobrazila,
+  ale byl proti zrcadlenemu SP mensi, vice vlevo a prilis nizko.
+
+Diagnostika prokazala, ze vsech pet `uGUIActionIcon2` controlleru se v SP i
+co-opu aktualizuje a kresli kazdy frame. Prompt nebyl vypnuty input modem;
+problem byl layout plus nasledna draw transformace. Spravny draw vstup je
+vtable slot `+0x58` (pro tento build absolutne `0x013919C8`, puvodni hodnota
+`0x00E18040`). World `uGUIActionIcon` pouziva jinou cestu.
+
+KROK 1 - SP LAYOUT VETEV
+
+V update `uGUIActionIcon2` na `0x0088F93F` se vola native layout test
+`0x009553D0`; byte na `0x0088F944` je puvodne zacatek `TEST AL,AL` (`84 C0`).
+Vratny live test zmenil pouze prvni byte na `30`, tedy `XOR AL,AL`, a tim pro
+tuto tridu vynutil SP local layout v co-opu. Aktivni test/state:
+
+    out/runtime/test-rerev2-action-icon-layout-live.py
+    out/runtime/action-icon-layout-live-20260908-01.json
+
+Apply/restore pro historicky PID34640:
+
+    python out/runtime/test-rerev2-action-icon-layout-live.py --pid 34640 --state out/runtime/action-icon-layout-live-20260908-01.json --mode apply
+    python out/runtime/test-rerev2-action-icon-layout-live.py --pid 34640 --state out/runtime/action-icon-layout-live-20260908-01.json --mode restore
+
+Po kroku 1 byly v SP i co-op snapshotu shodne hodnoty aktivniho stromu:
+
+    local position = (640, 587)
+    local scale    = (1, 1)
+    matrix position= (960, 880.5)
+    matrix scale   = (1.5, 1.5)
+
+Referencni soubory:
+
+    out/runtime/action-tree-current-coop-visible-low-20260908-01.json
+    out/runtime/action-tree-current-sp-visible-20260908-01.json
+    out/runtime/action-icons-coop-visible-low-20260908-01.json
+    out/runtime/action-icons-sp-visible-20260908-01.json
+
+Heap adresy controlleru/nodu v techto souborech jsou pouze diagnosticke a po
+restartu se nesmi pouzit. Shoda ulozenych matic pri rozdilnem obrazu dokazala,
+ze zbyvajici chyba vznikala az pri queue/draw transformaci.
+
+KROK 2 - OBEJITI LEGACY RESCALE JEN PRO uGUIActionIcon2
+
+Globalni FusionFix redirect vstupu `0x00E18040` vola
+`sub_E18040_rescale`. Ve skutecnem split screenu jeho obecna RESCALE vetev
+historicky pridava GUI korekci:
+
+    horizontalni scale = X * 0.8
+    vertikalni offset  = Y + viewportHeight * 0.25
+
+Prave to presne vysvetlovalo mensi prompt posunuty vlevo a dolu. Oprava nesmi
+menit globalni RESCALE, protoze jej pouziva mnoho dalsich GUI trid. Live test
+proto presmeroval pouze draw slot `uGUIActionIcon2` z globalniho vstupu na
+jiz nainstalovany no-RESCALE wrapper `sub_E18040`, stejny jako potvrzeny
+`uGUICommandBase`. V danem ASI procesu byl wrapper dynamicky precten ze slotu
+`0x0139AA40`; jeho konkretni ASLR adresa `0x586A25D0` je historicka a nesmi
+byt natvrdo vlozena do produkcniho kodu.
+
+Aktivni vratny test/state:
+
+    out/runtime/test-rerev2-action-icon2-draw-live.py
+    out/runtime/action-icon2-draw-live-20260908-01.json
+
+Apply/restore pro historicky PID34640:
+
+    python out/runtime/test-rerev2-action-icon2-draw-live.py --pid 34640 --state out/runtime/action-icon2-draw-live-20260908-01.json --mode apply
+    python out/runtime/test-rerev2-action-icon2-draw-live.py --pid 34640 --state out/runtime/action-icon2-draw-live-20260908-01.json --mode restore
+
+Skript overuje identitu procesu, puvodni vtable hodnotu, aktualni adresu
+wrapperu, zapisuje zalohu pred zmenou, meni ochranu pouze pro jeden 32bit slot
+a pri chybe provede rollback. Nepouziva dalsi Frida attachment, takze je
+bezpecny soubezne s jedinym aktivnim dual-render Frida testem.
+
+FINALNI LIVE VYSLEDEK
+
+Kombinace kroku 1 (SP local layout) a kroku 2 (draw bez legacy co-op RESCALE)
+dala v levem co-op viewportu stejny fixed HUD prompt jako ve zrcadlenem SP.
+Uzivatel vysledek vizualne potvrdil slovy: "Je to skvele, presne tak to ma
+vypadat." World prompt zustal mimo scope. Zmena je zatim pouze v pameti hry;
+production C++, testy, Release ASI ani GitHub ji dosud neobsahuji. Pri portu
+do kodu pouzit symbolicke vtable sloty/funkce a runtime split podminku, nikoli
+historicky PID, heap adresy nebo ASLR adresu wrapperu. Pred buildem jeste
+overit, zda ma draw bypass platit pouze pri `IsSplitScreenActive()`; v SP ma
+zustat nativni cesta byte-for-byte stejna.
+
+KRATKA IN-ENGINE SCENA: TEXTVOICE UZ JE W/2-LOCAL - LIVE POTVRZENO 2026-09-08
+-------------------------------------------------------------------------------
+
+Byla nalezena dalsi zhruba trisekundova in-engine scena, ktera pri prechodu
+ze skutecneho splitu do zrcadleneho non-split obrazu pouziva jinou TextVoice
+cestu nez drive opravena in-engine scena. Obraz i pozice titulku byly spravne:
+titulky byly ve stredu leveho viewportu a hotovy levy obraz se spravne
+zrcadlil doprava. Pouze sirka textu po prechodu problikla a zmensila se zhruba
+na 50 %.
+
+Pricina byla prokazana na live transformaci. Obecny
+`--non-split-subtitle-left-scale` nasobil X scale faktorem
+
+    leftFraction = (W/2) / W
+
+i tehdy, kdy konkretni TextVoice draw call uz mel native lokalni bounds o
+sirce W/2. Na 3840x1080 byl jeden z viditelnych potvrzenych pruchodu:
+
+    raw TextVoice bounds = {0,0,1920,1080}
+    transform X pred     = 0.00156250014
+    transform X po       = 0.00078125007       // chybne druhe zmenseni 0.5x
+
+Vratny A/B test bez obecneho druheho zmenseni vratil spravnou sirku; uzivatel
+vysledek vizualne potvrdil. Produkcni reseni nesmi globalne vypnout drive
+potrebnou korekci FMV a full-canvas in-engine titulku. Rozliseni ma byt podle
+skutecne sirky konkretniho draw callu, nikoli podle sceny nebo pevneho
+rozliseni:
+
+- FMV subtitle pruchod zustava korigovany podle aktivniho WMV draw frame;
+- non-FMV TextVoice s raw viewport width > W/2 je full-canvas a dostane
+  `leftFraction`;
+- non-FMV TextVoice s raw viewport width <= W/2+1 je uz viewport-local a dalsi
+  X scale se PRESKOCI;
+- Y scale a X/Y translation se v teto oprave nemeni.
+
+Do docasneho jednotneho live skriptu byla pridana telemetrie raw bounds,
+owneru a transformace a tento dynamicky W/2 guard. Zatim nejde o production
+C++ ani novy ASI build; pred portem jeste opakovane overit starsi full-canvas
+in-engine scenu i FMV.
+
+D3D9 BACKBUFFER PO RESETU/PRECHODU - KRITICKE PRO ZRCADLENI
+-------------------------------------------------------------------------------
+
+Live test pripojeny pred dokoncenim inicializace jednou hlasil uspesne
+`StretchRect` kopie (`HRESULT=0`), ale menu se vizualne nezrcadlilo. Drzel
+totiz COM referenci na stary backbuffer, ktery uz po D3D device/swap-chain
+prechodu nebyl prezentovan. Pozdeji se stejna cache projevila blikajicim
+zrcadlenim po dalsim prechodu.
+
+Produkce proto NESMI povazovat backbuffer ziskany pri inicializaci za trvale
+platny:
+
+1. Hook `IDirect3DDevice9::Reset` musi pred puvodnim Reset uvolnit retained
+   backbuffer i default-pool intermediate render target.
+2. Po uspesnem Reset se surfaces ziskaji znovu az pri prvnim dalsim non-split
+   Presentu.
+3. I bez pozorovaneho Resetu se pred kopii overi aktualni `GetBackBuffer(0,0)`;
+   pokud se COM pointer zmenil, stary backbuffer i intermediate se uvolni a
+   znovu vytvori podle aktualniho desc/formatu/rozmeru.
+4. Kazde pomocne `GetBackBuffer` pridava COM referenci; pri shodnem pointeru se
+   nova docasna reference ihned uvolni, pri zmene se ponecha jako nova retained
+   reference.
+5. Sirka, vyska i source/destination recty se vzdy odvozuji z aktualniho
+   backbuffer desc. Zadna konstanta 1920/3840 nepatri do produkcniho kodu.
+
+Docasny skript `out/runtime/test-rerev2-dual-sp-native-left-mirror.py` byl o
+tuto reset/refresh logiku rozsireny. Samotna Frida relace je nadale nestabilni
+pri rychlem detach/re-attach; po odpojeni je nutna prodleva a pouze jeden
+aktivni Frida agent.
+
+PRODUCTION PORT DUAL-MONITOR RENDERERU - TESTOVACI ASI 0.1.3 (2026-09-08)
+-------------------------------------------------------------------------------
+
+Po vizualnim potvrzeni live varianty byly do aktivniho `dllmain.cpp` preneseny
+nasledujici zmeny. Jsou aktivni pouze pri startu s `[COOP] DualMonitorMode=1`;
+vychozi hodnota v distribuovanem INI zustava 0 a stavajici single-monitor vetve
+se neprepisuji.
+
+1. NON-SPLIT/SP/MAIN MENU/SINGLE-VIEW CUTSCENY
+
+- Rozmery se vzdy ctou z aktualniho D3D9 backbufferu `W x H`; leva polovina je
+  `W/2 x H`. Hodnoty 1920 a 3840 se v algoritmu nepouzivaji.
+- Presnou native converter callsite `0x004AE831` obaluje
+  `dualmonitor::SingleScreenRectConverter`. Pri synchronnim native layout
+  rebuildu docasne nastavi active rect na `{0,0,W/2,H}` jen pro referencni
+  `{0,0,1280,720}` obdelnik a po volani jej ihned vrati.
+- `ApplyNativeLeftLayout` docasne nastavi split mode 2 a renderer rozmery
+  `W/2,H`, zavola puvodni `0x004AE570`, aplikuje logicke W/2 cache a jeste v
+  tomtez synchronnim kroku vrati fyzicke W,H i skutecny mode. Cached mode
+  `graphics+0xCE0` se potvrdi skutecnou hodnotou, aby engine layout hned
+  nevratil.
+- Pred puvodnim D3D9 `Present` se hotova leva cast zkopiruje pres pomocny
+  `W/2 x H` render target zpet do leve i prave poloviny. Jde tedy o zrcadleni
+  finalniho obrazu, nikoli o samostatne presouvani jednotlivych menu/HUD prvku.
+
+2. PRECHOD DO SKUTECNEHO SPLIT SCREENU
+
+- Pri mode 1 se obnovi fyzicke logicke cache `W,H`, zrcadleni se vypne a pouze
+  na hrane non-split -> split se jednou zavola native layout rebuild.
+- Po tomto prechodu se `screen0/screen1` sloty uz rucne neprepisuji. Engine je
+  vlastni a P1/P2 zustavaji ve dvou nezavislych polovinach celeho canvasu.
+- Pri navratu split -> non-split se oznaci novy W/2 native rebuild. Prave toto
+  oddeleni opravilo drive pozorovany stav, kdy P2 pouzival plnou sirku W a jeho
+  leva polovina byla schovana pod P1.
+
+3. D3D9 SURFACES A VYKON
+
+- Hooky jsou na vtable slotech Reset=16 a Present=17 pouze pro konkretni device
+  z `renderer+0x98`.
+- Pred Reset se uvolni retained backbuffer i default-pool intermediate. Po Reset
+  se ziskaji znovu az pri dalsim potrebnem non-split Presentu.
+- `GetBackBuffer` validace probiha pri prvnim pouziti, po Reset, pri prechodu do
+  non-split, po neuspesnem StretchRect a preventivne jednou za 300 non-split
+  Presentu. Neprobiha kazdy frame; tim odpada diagnosticka rezie, ktera mohla v
+  live Frida testu pusobit jako zadrhavani.
+- Pri shodnem COM pointeru se docasna reference okamzite uvolni; pri zmene se
+  stare surfaces zahodi a vytvori se novy intermediate podle aktualniho desc.
+
+4. FMV A TITULKY
+
+- Stavajici presny WMV mid-hook `0x00CC8788` pri dual non-split nastavi shader
+  `c20.x=0.5` a `c21.x=-0.5`. Quad se tim mapuje z NDC `[-1,+1]` do leve
+  poloviny `[-1,0]` se spravnym pomerem stran; finalni mirror jej zkopiruje
+  doprava.
+- Frame serial oznaci pouze skutecny FMV draw. Jen TextVoice v aktualnim nebo
+  bezprostredne nasledujicim FMV frame dostane horizontalni transform 0.5.
+- Obycejne SP titulky a potvrzene W/2-local in-engine titulky NEDOSTAVAJI zadny
+  dalsi obecny 0.5 scale. Jejich canvas je uz polovicni; druhe zmenseni bylo
+  pricinou textu prilis uzkeho a posunuteho vlevo.
+
+5. FIXED HUD ACTION PROMPT
+
+- `uGUIActionIcon2` patch zmeni prvni byte instrukce na `0x0088F944` z `84`
+  (`TEST AL,AL`) na `30` (`XOR AL,AL`), cimz v co-opu vybere SP-local layout.
+- Pouze draw slot `uGUIActionIcon2` je presmerovan na wrapper, ktery ve splitu
+  vola raw `sub_E18040` a obchazi stary obecny RESCALE. V non-split/SP vola
+  dosavadni `sub_E18040_rescale`, takze SP chovani zustava puvodni.
+- World-attached `uGUIActionIcon` tato zmena nezachytava.
+
+6. PAUSE MENU A OPRAVA BLIKANI
+
+- V realnem splitu dual modu se do prava opakuji `uGUICommonMenu`,
+  `uGUIPurpose` a `uGUIGuide`; single-monitor startup jejich vtable sloty vubec
+  neprepisuje.
+- Osmisekundovy live sampling ukazal, ze controller cache `object+0x168`
+  stridala `{0,0,3840,1080}` a `{1920,0,5760,1080}` (96 prechodu; 160 proti
+  353 vzorkum). Puvodni semanticky guard prijal jen prvni stav, proto se prava
+  kopie kreslila ob frame a viditelne blikala.
+- Produkcni guard prijima bud canonical bounds `{0,0,W,H}`, nebo presne
+  dynamicky prelozene `{splitWidth,0,splitWidth+W,H}`. Stale kontroluje vtable,
+  root owner a enabled/visible flags; nejde o siroky class hook.
+- Pred pravym replayem se ctyri cached bounds ulozi a bezprostredne po queue
+  callu vrati. Dalsi frame tak zacina z nativni leve cache a neosciluje mezi
+  obema transformacemi. Tato kombinace byla po live aplikaci uzivatelem
+  potvrzena jako vizualne v poradku.
+
+7. ZAMERNE NEZAHRNUTO
+
+- `uGUIFileText`/pribehove textove poznamky mely pripraveny live diagnosticky
+  pokus o duplikaci, ale po restartu hry nebyl vysledek vizualne potvrzen.
+  Proto nejsou soucasti ASI 0.1.3 a musi projit novym memory-only testem.
+- Historicke PID, heap adresy a ASLR adresy z live skriptu nejsou ve zdroji.
+
+Aktivni implementace je v
+`source/ResidentEvilRevelations2.FusionFix/dllmain.cpp`. Referencni live skript
+zustava `out/runtime/test-rerev2-dual-sp-native-left-mirror.py`. Pred GitHub
+pushem musi presne tento Release ASI projit hernim testem: main menu/SP mirror,
+FMV+titulky, in-engine single-view scena, prechod do/ze splitu, pravy viewport,
+ActionIcon2 a stabilni duplikovane pause GUI.
+
+STARTUP TIMING OPRAVA PO PRVNIM ASI TESTU (2026-09-08)
+-------------------------------------------------------------------------------
+
+Prvni ASI 0.1.3 kandidat se nacetl, ale dual renderer se vizualne vubec
+neaktivoval. Read-only kontrola bez dalsiho hooku v bezicim procesu prokazala:
+
+    callsite 0x004AE831 = E8 DA DA FF FF -> stale native 0x004AC310
+    D3D9 Reset/Present = puvodni nehookovane prology
+    split mode          = 0
+    screen0             = {0,0,3840,1080}
+    renderer            = 3840x1080
+
+ASI i INI pritom byly spravne (`FileVersion=0.1.3`, `DualMonitorMode=1`).
+Pricinou byl jednorazovy `dualmonitor::Install()` behem `Init()`: renderer nebo
+device v tomto okamziku jeste nebyl vytvoren, funkce vratila false a dalsi pokus
+uz neexistoval. Start hry navic muze cekat na focus, takze pevna casova prodleva
+ani detekce uvítaci obrazovky neni spolehliva.
+
+Opraveny startup pouziva technickou readiness podminku. `Init()` pouze nastavi
+restart-only install request. Existujici background tuning/bridge thread vola
+`dualmonitor::PollInstall()` a nejvyse jednou za 100 ms kontroluje skutecny
+renderer a `renderer+0x98` D3D device. Dokud chybi, nic nemeni a zkousi znovu;
+po jejich vzniku atomicky nainstaluje native converter + Reset/Present hooky
+prave jednou. Neocekavany callsite nebo selhani SafetyHook je naopak permanentni
+guard failure a uz se neopakuje. W/2 layout samotny se stale sklada az z prvniho
+Presentu s dostupnymi graphics strukturami. Focus proto muze inicializaci pouze
+pozdrzet, nikoli zpusobit trvale preskoceni opravy.
+
+DUAL NON-SPLIT MAIN MENU: WMV POZADI NESMI DOSTAT DRUHE PULENI - LIVE POTVRZENO 2026-09-09
+-------------------------------------------------------------------------------
+
+Po cistem startu ASI 0.1.3 se hlavni menu sice spravne umistilo do leveho
+`W/2 x H` obrazu a finalni Present je korektne zrcadlil doprava, ale od poloviny
+leveho monitoru zustavala poskozena/neobnovovana plocha. Na 3840x1080 byla
+hranice presne `x=960`, tedy `W/4`; pri pohybu mysi v ni zustavaly stare stopy.
+Stejny problem se opakoval po novem startu, takze neslo o stary backbuffer ani
+jednorazove chybne poradi inicializace.
+
+A/B screenshoty a read-only D3D frame profiling prokazaly:
+
+- native screen0, active rect i GUI/input cache byly spravne `0,0,W/2,H`;
+- hlavni menu pouziva WMV video take pro animovane pozadi;
+- toto menu video se uz nativne kresli do samostatneho targetu a viewportu
+  `W/2 x H`;
+- produkcni hook na `0x00CC8788` rozpoznal pouze stejny WMV VS/PS par jako u
+  filmove sceny a pri kazdem dual non-split WMV draw bez dalsiho rozliseni
+  nastavil `c20.x=0.5`, `c21.x=-0.5`;
+- menu pozadi proto dostalo druhe puleni a vyplnilo jen `W/4 x H`. Finalni
+  zrcadleni pouze spravne zkopirovalo uz poskozenou levou polovinu.
+
+Neuspesny kontrolni pokus znovu vyvolal native W/2 layout az po uplnem nacteni
+menu; obraz se nezmenil. Tim byla vyloucena domnenka, ze jde jen o prilis casny
+layout rebuild. Nebezpecny obecny frame profiler, ktery volal mnoho D3D getteru
+zevnitr draw hooku, jednou zablokoval render thread a hra nasledne spadla; tuto
+diagnostickou cestu neopakovat. Lehky profiler, ktery pouze sleduje Set* stavy,
+je bezpecnejsi.
+
+Potvrzeny memory-only fix je:
+
+    out/runtime/test-rerev2-dual-local-wmv-live.py
+
+Live guard je class/shader a geometry specific, nikoli zavisly na konkretnim
+menu nebo rozliseni:
+
+1. dual-monitor mode je aktivni a hra je v non-split stavu;
+2. aktivni vertex/pixel shader je presny custom-screen + WMV par;
+3. aktualni D3D viewport uz zacina na `(0,0)`, ma vysku `H` a sirku nejvyse
+   `W/2+1`;
+4. pouze v tomto uz W/2-local pripade se puvodni full-canvas konstanty
+   `c20.x=0.5`, `c21.x=-0.5` nahradi lokalnimi hodnotami:
+
+       localAspect = (W/2) / H
+       c20.x = (16/9) / localAspect
+       c21.x = 0
+
+   Pro dva 1920x1080 monitory je vysledek `c20.x=1`, `c21.x=0`.
+5. Skutecne FMV s full-canvas viewportem si ponecha dosavadni mapovani do leve
+   poloviny `c20.x=0.5`, `c21.x=-0.5` a finalni mirror.
+
+Po zapnuti testu uzivatel hlavni menu okamzite vizualne potvrdil jako spravne.
+Test zustal aktivni bez timeoutu pro navazujici hledani dlouhe in-engine
+cutsceny. Pri pristim produkcnim portu ma byt stejna dynamicka viewport podminka
+pridana primo do existujiciho WMV mid-hooku; historicke PID, heap/shader pointery
+a ASLR adresa/offset diagnostickeho ASI se nesmi prenest. Zmenu zahrnout do
+pristiho buildu az soucasne s vizualne potvrzenou opravou dlouhe cutscene.
+
+Referencni snimky aktualni relace (ignorovane runtime artefakty):
+
+    out/runtime/screenshots/menu-artifact-clean-restart-20260909.png
+    out/runtime/screenshots/menu-after-local-wmv-guard-20260909.png
+
+FINALNI ROZLISENI DUAL NON-SPLIT TITULKU - LIVE POTVRZENO 2026-09-10
+-------------------------------------------------------------------------------
+
+Puvodni production pravidlo ASI 0.1.3 pouzivalo pouze informaci, zda byl v
+aktualnim nebo predchozim Presentu vykreslen WMV shader. V takovem pripade
+nasobilo X transformaci kazdeho subtitle draw callu hodnotou 0.5. To nestacilo:
+jednotlive situace pouzivaji ruznou kombinaci `uGUITextVoice`,
+`uBioGUISubtitles`, full-canvas a jiz W/2-local bounds. Naslepo pridane dalsi
+puleni proto vzdy opravilo jednu scenu a rozbilo jinou.
+
+Live telemetrie potvrdila tyto ctyri pripady v dual-monitor non-split vetvi:
+
+1. Bezny SP text (napr. `Where have I been taken?`):
+   - `uGUITextVoice` raw bounds maji sirku W;
+   - `uBioGUISubtitles` raw bounds maji uz sirku W/2;
+   - zadny dalsi obecny X scale se nesmi aplikovat.
+2. Kratka asi trisekundova in-engine scena:
+   - viditelny subtitle canvas je uz W/2-local;
+   - dalsi 0.5 by text chybne zmensilo na polovinu.
+3. Dlouha in-engine scena (napr. `Moira, are you OK?`):
+   - TextVoice i BioSubtitle maji raw bounds o sirce W;
+   - X transformace jeste neni korigovana;
+   - presne jedno nasobeni `v13[0] *= 0.5` ji spravne umisti do leveho
+     monitoru, odkud ji finalni Present mirror zkopiruje doprava.
+4. FMV:
+   - oba subtitle pruchody mohou byt full-canvas;
+   - existujici WMV frame korekce uz za behu filmu aplikuje prvni 0.5;
+   - druhe 0.5 by text znovu splostilo. Pri pauze WMV draw prestane bezet,
+     proto musi obecna cutscene cesta dodat prave jedno puleni sama.
+
+Stabilni discriminator neni text, casovac ani konkretni rozliseni. Je jim
+full-canvas pruchod `uBioGUISubtitles`. Produkcni algoritmus ASI 0.1.4 proto:
+
+- pouze pri `[COOP] DualMonitorMode=1` a skutecnem non-split stavu sleduje
+  `gDualMonitorPresentSerial`;
+- pri subtitle draw callu rozpozna controller pomoci jeho existujiciho vtable /
+  class guardu a raw sirku z konkretniho command bufferu;
+- full-canvas znamena dynamicky `rawWidth > W/2+1`, kde W se cte z aktualniho
+  rendereru; zadne 1920/3840 konstanty nejsou pouzity;
+- full-canvas BioSubtitle ulozi serial aktualniho Presentu; marker plati jen
+  aktualni a bezprostredne nasledujici Present, protoze TextVoice a Bio mohou
+  prijit v opacnem poradi;
+- pouze full-canvas subtitle draw v takto oznacenem frame je kandidat na 0.5;
+- pred nasobenim se z pomeru `abs(scaleX/scaleY)` overi, zda uz je transformace
+  vlevo zmensena. TextVoice porovnava proti dynamickemu pomeru H/W a (H/W)/2;
+  BioSubtitle proti svemu canonical pomeru 720/1280 a jeho polovine;
+- je-li pomer uz blize polovicni variante, dalsi zmenseni se preskoci. Tim FMV
+  za behu dostane pouze stavajici WMV korekci, zatimco dlouha in-engine scena a
+  pauznute FMV dostanou presne jednu korekci z nove vetve;
+- local bounds W/2 zustavaji nedotcene, cimz se zachova bezny SP i kratka
+  in-engine scena.
+
+Finalni memory-only matice byla uzivatelem vizualne potvrzena v jedne relaci:
+
+    FMV titulky                  OK
+    bezne SP titulky             OK
+    kratka in-engine cutscene    OK
+    dlouha in-engine cutscene    OK
+
+Referencni potvrzeny live agent je
+`out/runtime/test-rerev2-long-cutscene-all-subtitles-live.py`. Jeho runtime
+ASLR adresy a shader pointery nejsou soucasti produkcniho kodu.
+
+PRODUCTION PORT ASI 0.1.4 - MENU WMV + FINALNI TITULKY (2026-09-10)
+-------------------------------------------------------------------------------
+
+Do aktivniho `source/ResidentEvilRevelations2.FusionFix/dllmain.cpp` byly po
+vyse uvedenych live testech preneseny dve posledni potvrzene opravy:
+
+- WMV hook hlavniho menu nyni cte skutecny D3D viewport. Pokud je draw jiz
+  `0,0,W/2,H`, pouzije lokalni aspect korekci
+  `(16/9) / ((W/2)/H)` a nulovy X offset; tento draw take neoznaci jako FMV.
+  Skutecny full-canvas film si ponecha mapovani `scale=0.5, offset=-0.5` a
+  oznaci aktualni FMV frame. Tim zmizela W/4 poskozena oblast menu se stopami
+  mysi, aniz by se zmenila hotova leva->prava Present duplikace.
+- Stare samotne `IsRecentDualMonitorFmvFrame()` rozhodovani titulku bylo
+  doplneno o dynamicky full-canvas BioSubtitle marker a kontrolu jiz aplikovane
+  transformace popsanou vyse. FMV, SP a oba typy in-engine scen tak nemohou
+  dostat vzajemne nespravny druhy 0.5 scale.
+
+Vsechny podminky zustavaji uzavrene v dual-monitor non-split vetvi. Skutecny
+split screen, one-monitor split a vychozi SP pri `DualMonitorMode=0` se touto
+zmenou neupravuji. Drive potvrzene dual renderer, final-frame mirror, prechody
+split/non-split, ActionIcon2, HUD prompt a pause GUI duplikace zustaly zachovany.
+
+`uGUIFileText` pribehove textove poznamky nebyly po restartu live potvrzeny a
+zamerne ani tento build neobsahuje; pred produkcnim portem stale vyzaduji novy
+memory-only test.
+
+Release build a lokalni deploy byly dokonceny 2026-09-10:
+
+    verze             0.1.4
+    ProductVersion    0.1.4-8abdca882
+    SHA-256           E88405DA392F0C9F0B3DB3FECF60F5574E4CC521EB9485A8B182021F24DA693D
+    build artifact    out/packages/rerev2/release/scripts/
+                      ResidentEvilRevelations2.FusionFix.asi
+    game deploy       G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\
+                      scripts\ResidentEvilRevelations2.FusionFix.asi
+
+Predchozi nasazene ASI 0.1.3 s SHA-256
+`6715D879ABAEC3B84370C55DFD65EF99A5929EEE15E1449EAF92937DE7AA3A09`
+je zachovano pro rollback jako:
+
+    out/deploy-backups/
+    ResidentEvilRevelations2.FusionFix-0.1.3-pre-0.1.4-20260910.asi
+
+Build je pouze staticke overeni. Pred jakymkoli GitHub pushem musi uzivatel
+otestovat skutecne nasazene ASI 0.1.4 po novem startu hry, minimalne hlavni
+menu, FMV, bezne SP titulky, kratkou i dlouhou in-engine scenu a prechod do
+skutecneho split screenu.
+
+DUAL NON-SPLIT REBUILD PREPISOVAL EVENTOVOU KAMERU - LIVE POTVRZENO 2026-09-10
+-------------------------------------------------------------------------------
+
+Po nasazeni dual-monitor non-split rendereru fungovalo zrcadlene SP korektne,
+ale ve skutecnem co-opu prestaly in-engine cutsceny prepinat uhly kamery. Kamera
+zustala v poloze, ve ktere ji mel hrac pri spusteni sceny. Vypnuti cele
+dual-monitor vetve strihy okamzite vratilo; finalni Present mirror ani samotne
+SP zrcadleni pricinou nebyly.
+
+Rozsireny trace odhalil presne poradi udalosti:
+
+- hra pri vstupu do cutsceny korektne ulozila do `graphics+0x34` ukazatel na
+  `uEventMotionCamera` (vtable `0x01264FE0`);
+- ciselne mapovani zustalo `camera0=0`, proto starsi trace vypadaly spravne;
+- nasledujici vlastni `ApplyNativeLeftLayout()` docasne nastavil nativni mode 2
+  a zavolal `UpdateLayout` na `0x004AE570`, aby vytvoril W/2 x H screen0;
+- tento rebuild pritom slot `graphics+0x34` znovu svazal s beznou gameplay
+  kamerou (vtable `0x01264F30`), prestoze ciselne mapovani nezmenil;
+- eventova projekce pak probehla jen dvakrat v prvnim frame a ustala, proto se
+  zadne dalsi skriptovane strihy neprovedly.
+
+Potvrzeny memory-only fix je
+`out/runtime/test-rerev2-dual-preserve-event-camera-live.py`. Pred VLASTNIM
+W/2 rebuildem si ulozi screen0 camera pointer pouze tehdy, kdyz objekt existuje,
+je citelny a ma presny event-camera vtable. Ihned po navratu z `UpdateLayout`
+stejny pointer vrati do `graphics+0x34`, pokud objekt stale existuje a stale je
+eventovou kamerou. Nezasahuje do hry pred ani po cizich layoutech a nevynucuje
+zadnou kameru v beznem gameplayi.
+
+Live vysledek po nekolika prechodech/scenach:
+
+    targeted W/2 rebuilds       11
+    restored event pointers      3
+    event projection calls   39986
+
+Uzivatel nasledne vizualne potvrdil, ze co-op cutscena opet spravne striha
+kameru. Oprava je nezavisla na rozliseni: nepridava zadny pixelovy offset ani
+konstantu 1920/3840, pouze zachovava identitu aktivni eventove kamery pres nas
+vlastni synchronni layout rebuild. Stabilni herni konstanty jsou
+`graphics+0x34` a vtable `0x01264FE0`; heap/ASLR adresy z konkretni relace se do
+produkce neprenaseji.
+
+Produkce ASI 0.1.5 ma tuto ochranu primo v `ApplyNativeLeftLayout()`. Build je
+staticke overeni; pred GitHub pushem je nutny novy herni test zkompilovaneho ASI
+v co-op in-engine cutscene a kontrola, ze SP/menu/FMVs/split viewporty zustaly
+beze zmeny.
+
+Release ASI 0.1.5 byl nasledne sestaven a lokalne nasazen 2026-09-10:
+
+    FileVersion        0.1.5
+    ProductVersion     0.1.5-8abdca882
+    SHA-256            A25C15B54E4FE5010DA3C7C21393AF3F614DFEE08F816215322149DD3492567D
+    build artifact     out/packages/rerev2/release/scripts/
+                       ResidentEvilRevelations2.FusionFix.asi
+    game deploy        G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\
+                       scripts\ResidentEvilRevelations2.FusionFix.asi
+    rollback backup    scripts\.fusionfix-backups\
+                       ResidentEvilRevelations2.FusionFix.asi.
+                       20260910-235059-953.bak
+
+Offline permanent co-op sada prosla 10/10. Hash build artifactu a souboru ve
+hre byl po kopirovani shodny. GitHub push zatim nebyl proveden; nejdriv se musi
+otestovat skutecne nactene ASI 0.1.5.
+
+UGUIFILETEXT: PRIBEHOVE POZNAMKY DUPLIKOVAT DO P2 - LIVE POTVRZENO 2026-09-11
+-------------------------------------------------------------------------------
+
+Pribehove psane poznamky jsou samostatne controllery `uGUIFileText`. V pravem
+dual-monitor split viewportu se nativne nevykresluji, takze druhy hrac nevidi
+obsah dulezity pro pribeh. Drive pripraveny pokus nebyl prenesen do ASI 0.1.4
+ani 0.1.5, protoze hra pri prvnim experimentu spadla pred vizualnim potvrzenim.
+Nejde tedy o technicke omezeni ani zapomenutou kompilaci; zmena byla zamerne
+zadrzena podle pravidla memory-only -> herni potvrzeni -> production port.
+
+Samostatny potvrzeny live test je:
+
+    out/runtime/test-rerev2-dual-file-text-duplicate-live.py
+
+Algoritmus je uzavren pouze ve skutecnem split screenu:
+
+- zachyti sdileny GUI draw vstup `0x00E18040`;
+- prijme pouze objekt s presnym `uGUIFileText` vtable `0x013999A8`;
+- prijme pouze prave aktivni controller (`object+0x148 & 0x200`), ne neaktivni
+  cached instance;
+- po dokonceni puvodniho leveho draw docasne zvysi `object+0x40` o
+  `physicalRendererWidth/2`, jednou zopakuje stejny draw a puvodni X vrati v
+  `finally` jeste v tomtez vlakne/frame;
+- thread-local recursion guard zabrani, aby replay vyvolal dalsi replay;
+- v non-split zrcadlenem SP se hook nepouzije, protoze tam uz cely hotovy levy
+  obraz kopiruje Present mirror.
+
+Uzivatel vizualne potvrdil spravne zobrazeni otevrene poznamky v obou
+viewporte-ch. Finalni live citace pred odpojenim:
+
+    originalCalls = 218699
+    replayCalls   = 218699
+    replayErrors  = 0
+    dynamic shift = 1920 pri fyzickem canvasu 3840x1080
+
+1920 neni produkcni konstanta. Posun se pri kazdem draw pocita jako aktualni
+fyzicka sirka/2, takze plati pro libovolne sude rozliseni dvou stejne sirokych
+monitoru. Do pristiho production buildu portovat pres symbolicky wrapper/vtable
+slot a stejny class/active/split/recursion guard; neprenaset historicky PID ani
+heap adresu `0x2A9CC0B0`. Pred buildem doplnit offline test obnoveni puvodniho
+X a zakazu replaye v non-split rezimu.
+
+MIXED INPUT: CONTEXT ACTION P1 KEYBOARD -> P2 OPRAVENO 2026-09-11
+----------------------------------------------------------------
+
+GitHub feedback odhalil dve provazane zavady pri P1 keyboard/mouse + P2 pad:
+P2 prompt mohl prepnout na klavesovou ikonu a zavazneji P1 `E`/kontextovy LMB
+aktivoval interakci P2. Uzivatel to reprodukoval s P2 u prekazky a P1 mimo ni;
+obe postavy drive dokazaly provest stejnou akci jednim P1 vstupem.
+
+Vyloucene slepe vetve, vsechny po testu vracene:
+
+- samotne povoleni P2 pad action handlu v `0x00A9C450` handly vytvorilo, ale
+  nezmenilo routing;
+- docasny gamepadovy globalni profil po dobu logickeho update
+  `uGUIActionIcon2::Update` na `0x0088F750` mohl stabilizovat prompt, ale P1 E
+  stale aktivovalo P2;
+- zmena interaction eligibility gate `0x007017D5` problem neresila;
+- globalni zamknuti profilu na pad bylo necitlive a zpusobilo neovladatelnost.
+
+Rozhodujici read-only trace
+`out/runtime/trace-rerev2-mixed-keyboard-true-live.py` zachytil pri jednom E
+tri ocekavane keyboard dotazy v kontextu actor slotu 0 a jeden neocekavany:
+
+    return/caller 0x0040D316
+    query args    (1, 28, 2)
+    EBP actor     slot 1 / P2
+    input mode    1 (keyboard)
+
+Staticka disassemblace ukazala skutecnou pricinu. Dispatcher interaktivnich
+objektu si v `0x0040EEC2..0x0040EED0` nativne vybere player index a jeho actor
+do EBP. Na `0x0040EF84` ale nasledne rozhodne mezi keyboard a pad vetvi pouze
+pres globalni `cfg+0x15C4BC`, bez kontroly tohoto aktora. Pri globalnim keyboard
+profilu proto take P2 vstoupi do keyboard vetve a precte stejne E jako P1.
+
+Potvrzeny memory-only fix je
+`out/runtime/test-rerev2-mixed-interactable-input-gate-live.py`. Sedmibytovy
+nativni CMP na `0x0040EF84` nahradi reverzibilnim JMP do thunku. Thunk zopakuje
+puvodni CMP a pouze ve skutecnem split screenu ponecha ZF=1/keyboard jen tehdy,
+kdyz EBP odpovida actor pointeru v `mode+0x8F8` (assigned primary slot). Pro P2
+vymaze jen ulozeny ZF a puvodni JNE hry zvoli jeji nativni pad vetev. Registry,
+ostatni flags, SP i puvodni false vysledek zustavaji beze zmeny.
+
+Uzivatel vizualne potvrdil:
+
+- P2 u prekazky uz po P1 E akci neprovede;
+- P2 A na gamepadu nadale funguje;
+- hra zustala responzivni.
+
+Production port je 29. polozka `InputGates`:
+
+    {0x40EF84, actor MOV ESI,EBP = 0xF5, CMP ModRM EAX = 0xB8}
+
+Po pridani 29. 0x100-bytoveho input thunku se puvodni pevny capture slot
+`allocation+0x1C00` nesmi pouzit, protoze jej obsadi novy gate. Capture thunk se
+proto pocita jako `allocation + InputGates.size()*0x100` (nyni 0x1D00), zatimco
+counter page zustava na +0x2000. Toto je dulezite pri jakemkoli dalsim rozsireni.
+
+UGUIFILETEXT: PRODUCTION PORT PRO BUILD 0.1.6
+--------------------------------------------
+
+Potvrzeny live algoritmus byl prenesen do symbolickeho vtable wrapperu
+`sub_E18040_file_text`; instaluje se pouze pri startu s `DualMonitorMode=1`.
+Produkce kontroluje exact vtable `0x013999A8`, active mask `object+0x148 & 0x200`,
+skutecny split-screen a platne sude fyzicke rozmery rendereru. Po normalnim levem
+draw zopakuje draw na `original object+0x40 + physicalWidth/2` a puvodni X ihned
+obnovi. Thread-local recursion guard a prime volani rendereru zabranuji dalsimu
+replayi. Non-split SP se timto wrapperem neduplikuje, protoze tam kopiruje cely
+hotovy levy obraz Present mirror.
+
+Offline permanentni sada nove kontroluje vsech 29 input thunk blobu a CPU vetvi,
+FileText exact class/active/dual/split/rozmer scope, dynamicky W/2 posun i obnoveni
+puvodni hodnoty X. Definitivni rendering a mixed-input chovani musi stale potvrdit
+nasledujici herni test zkompilovaneho ASI.
+
+BUILD A NASAZENI 0.1.6 2026-09-11
+---------------------------------
+
+Release build probehl uspesne pres `tools/build.ps1 -Configuration Release`.
+Offline permanentni sada po produkcnim portu prosla 11/11 testu. Vysledne ASI:
+
+    FileVersion    0.1.6
+    ProductVersion 0.1.6-8abdca882
+    Size           1627648 bytes
+    SHA-256        C05E16B78B72A5D4BE47A9FA27E57B651F2E95B4D3CCAD5FA8974EBF13DB789B
+
+Soubor byl nasazen do herniho `scripts` adresare bez prepisu existujiciho INI;
+hash nasazeneho ASI se presne shoduje s Release artefaktem. Predchozi verze je
+obnovitelna ze zalohy:
+
+    G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\scripts\.fusionfix-backups\ResidentEvilRevelations2.FusionFix.asi.20260911-022419-547.bak
+
+Pred pripadnym GitHub pushem je nutny herni regression test zkompilovaneho ASI:
+P1 E nesmi aktivovat P2, P2 A musi zustat funkcni, otevrena story/textova poznamka
+se musi v dual-monitor split screenu vykreslit v obou viewporte-ch a soucasne se
+nesmi zhorsit non-split mirror, titulky, cutscene kamera ani pravy co-op viewport.
+
+MIXED INPUT: P1 LMB BLOKOVANY P2 PROMPT FIX 2026-09-11
+-----------------------------------------------------
+
+Po potvrzeni actor-aware dispatcher gate z buildu 0.1.6 se ukazala druha cast
+stejneho sdileneho-input problemu. Pri P1 keyboard/mouse + P2 gamepad fungoval
+P1 LMB utok normalne, dokud P2 nemel aktivni kontextovy prompt. Jakmile P2 stal
+u prekazky/predmetu s promptem, P1 LMB prestal utocit. P1 E pritom P2 spravne
+neovladalo a po odchodu P2 od promptu LMB opet fungovalo.
+
+Kontrolni rollback pouze produkcniho gate `0x0040EF84` na puvodni globalni CMP
+dal jednoznacne horsi nativni chovani: P1 LMB neutocilo a misto toho P2 preskocil
+prekazku. Gate tedy zavadu nezpusobil a musi zustat. Zastavil chybne provedeni P2
+akce, ale sdileny P2 kandidat jeste dokazal zamitnout P1 actor-local akci.
+
+Read-only trace `out/runtime/trace-rerev2-p1-lmb-decision-live.py` zachytil obe
+rozhodovaci cesty v `0x00701770`:
+
+    P2 prompt aktivni:
+      P1 LMB true caller 0x00A18801
+      group-five-a candidate 0x2A5F7320
+      candidate+0x2D0 status = 10
+      candidate+0x2AC owner  = 1 (assigned P2)
+      okamzity return false pres 0x00701ADB
+
+    P2 bez promptu:
+      vsechny group-five-a/group-five-b statusy = 0
+      pruchod pres 0x00701A38 k P1 actor-local objektu
+      return true pres 0x00701AD1
+
+Potvrzeny memory-only fix je
+`out/runtime/test-rerev2-p1-lmb-p2-prompt-live.py`, experiment version 2. Na
+`0x00701955` nahrazuje cely sestibytovy nativni
+`mov eax,[esi+0x2D0]` (`8B 86 D0 02 00 00`) JMPem do state-backed thunku.
+Thunk nejdrive zopakuje puvodni MOV a zachova registry i flags. Pouze ve skutecnem
+split screenu, pouze kdyz EBX odpovida actoru v `mode+0x8F8` (assigned P1) a
+`candidate+0x2AC` odpovida `mode+0x8FC` (assigned P2), preskoci ciziho kandidata
+na nativni loop increment `0x00701972`. Vsechny ostatni pripady se vraceji na
+puvodni status testy `0x0070195B`. Filtr je tedy pred konkretnimi statusy 3..5/10,
+neni vazany jen na jednu zbran ani na jedinou hodnotu promptu.
+
+Live aplikace PID 11164:
+
+    state      out/runtime/p1-lmb-p2-prompt-pid11164-20260911-01.json
+    allocation 0x01E70000
+    site       E9 A6 E6 76 01 90
+
+Uzivatel ve stejnem aktivnim prompt stavu vizualne potvrdil vsechny tri povinne
+regrese:
+
+- P1 LMB normalne utoci a P2 pritom neprovede kontextovou akci;
+- P1 E P2 neovlada;
+- P2 A na gamepadu stale provede jeho vlastni interakci.
+
+Production port pro build 0.1.7 je `InteractionCandidateCode` v
+`CoopNativeCode.h`. Instalace je soucast `InstallInput`, kontroluje presnych sest
+puvodnich bytu a uklada novy 0x100-bytovy thunk do `allocation+0x1E00`, tedy za
+29 input gate slotu (+0x1D00 capture thunk) a pred counter page +0x2000. Offline
+CPU test musi overit dynamicke primary/secondary assignmenty, split/non-split,
+chybejici pointery, zachovani registru/flags a oba vystupy 0x70195B/0x701972.
+
+BUILD A NASAZENI 0.1.7 2026-09-11
+---------------------------------
+
+Produkce i po opakovanem Release buildu prosla 12/12 offline testu. Nova sada
+navic emuluje `InteractionCandidateCode` pro P1/P2, obracene assignmenty,
+non-split fallback, chybejici mode/actor-manager pointery a kontroluje zachovani
+vsech registru krome nativne nacitaneho EAX i uplnych EFLAGS. Vysledne ASI:
+
+    FileVersion    0.1.7
+    ProductVersion 0.1.7-8abdca882
+    Size           1631232 bytes
+    SHA-256        0E06069466E238210EEFB10EB900EE4FDCAC8BE2CC6E57A13CCEE384FBD5B7B3
+
+Hra PID 11164 byla pred nasazenim ukoncena. Prvni prepis narazil na kratky
+dozivajici file lock; hash kontrola spravne odmitla povazovat nasazeni za hotove.
+Po uvolneni zamku byl prekopirovan pouze ASI soubor, existujici INI zustalo
+nedotcene a cilovy hash se presne shoduje s Release artefaktem. Predchozi 0.1.6
+je obnovitelna ze zalohy:
+
+    G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\scripts\.fusionfix-backups\ResidentEvilRevelations2.FusionFix.asi.20260911-172954-125.bak
+    SHA-256 C05E16B78B72A5D4BE47A9FA27E57B651F2E95B4D3CCAD5FA8974EBF13DB789B
+
+Pred GitHub pushem musi zkompilovane ASI znovu projit stejnymi tremi hernimi
+kontrolami (P1 LMB utok pri P2 promptu, P1 E bez P2 akce, P2 A funkcni) a kratkou
+regresi dosavadnich dual/single monitor rendering fixu.
+
+DUAL NON-SPLIT: SPOLEHLIVE ROZLISENI MAIN-MENU WMV A FMV 2026-09-11
+------------------------------------------------------------------
+
+Po cistem startu buildu 0.1.7 se u nove hry vratila regrese: finalni Present
+mirror fungoval, ale samotne FMV zustalo rozlozene pres celou fyzickou sirku.
+V levem viewportu proto byla videt jen jeho leva polovina a tato polovina se
+zrcadlila doprava. Soucasne main menu muselo zustat bez dalsiho puleni, jinak
+se v prave pulovine leveho monitoru objevila poskozena oblast se stopami mysi.
+
+Pricina byla v produkcnim klasifikatoru v presnem WMV draw hooku `0x00CC8788`.
+Ten predpokladal, ze animovane pozadi hlavniho menu pouziva D3D viewport W/2,
+zatimco skutecne FMV pouzije full-width viewport. Read-only/live trace ale u
+skutecneho FMV na fyzickem platne 3840x1080 opakovane zachytil take viewport
+`{X=0,Y=0,W=1920,H=1080}`. Samotna velikost viewportu tedy tyto dva WMV
+pruchody nerozlisuje a nesmi uz byt pouzita jako rozhodovaci signal.
+
+Memory-only dukaz mel dve faze:
+
+1. Siroky Frida test vnutil vsem WMV volanim shader hodnoty
+   `c20.x=0.5`, `c21.x=-0.5`. Skutecne FMV se okamzite srovnalo do leveho
+   viewportu, ale podle ocekavani se znovu poskodilo hlavni menu.
+2. Cilovy test sledoval symbolicky draw slot `uGUICommonMenu=0x013950C8` a
+   overoval exact vtable `0x01395070`, root ownership, visible/enabled mask
+   `object+0x148 & 0x201` a platne cached bounds. V hlavnim menu existoval
+   aktivni CommonMenu; behem skutecneho FMV nebyla nalezena zadna aktivni
+   instance. Pouze bez aktivniho CommonMenu proto test pouzil 0.5/-0.5.
+
+Uzivatel v jednom procesu vizualne potvrdil obe strany testu: skutecne FMV melo
+spravny pomer stran a bylo cele v levem viewportu, zatimco navrat do hlavniho
+menu uz nevytvarel poskozenou plochu ani stopy kurzoru.
+
+Production port pro build 0.1.8 nepouziva Fridu, periodicky scan ani heapovou
+adresu z konkretni relace. Stavajici wrapper
+`sub_E18040_pause_common_menu` uz kvuli dual-monitor duplikaci udrzuje
+`gActivePauseCommonMenu`; WMV hook pouze zavola existujici semantickou kontrolu
+`IsPauseCommonMenu(GetActivePauseCommonMenu())`:
+
+- aktivni CommonMenu = animovane menu WMV, ponechat lokalni W/2 transformaci
+  (`c21.x=0`, scale z `(physicalWidth/2)/physicalHeight`);
+- bez aktivniho CommonMenu = skutecne FMV, mapovat NDC do leve poloviny
+  (`c20.x=0.5`, `c21.x=-0.5`) a oznacit FMV frame pro titulky.
+
+Vypocet zustava dynamicky pro libovolne dve stejne siroke obrazovky. Produkcni
+hot path nepridava zadne prohledavani procesu; provede jen nekolik chranenych
+cteni jiz sledovaneho GUI objektu v okamziku WMV draw. Diagnosticky Frida test
+naopak za relaci zpracoval pres 100 000 vysokofrekvencnich callbacku, takze
+pripadne skubani behem ladeni nelze prisuzovat stejne rezii finalnimu ASI.
+
+BUILD 0.1.8 2026-09-11
+----------------------
+
+Release build s novym semantickym WMV klasifikatorem probehl uspesne pres
+`tools/build.ps1 -Configuration Release`; offline permanentni co-op sada prosla
+12/12 testu. Artefakt zatim nebyl nasazen do bezici hry ani odeslan na GitHub:
+
+    FileVersion     0.1.8
+    ProductVersion  0.1.8-8abdca882
+    Size            1631232 bytes
+    SHA-256         94A62B0C7C50F7572FA46EE057FCAE349D4CBA0B04A1EE0425FCA4579E0E0844
+
+Pred nasazenim zustava nutny cisty herni test bez Fridy: hlavni menu bez
+artefaktu/stopy mysi, nove FMV cele v levem viewportu a zrcadlene doprava,
+spravne FMV titulky a kratka kontrola split-screen viewportu i mixed inputu.
+
+MIXED INPUT: P1 LMB VS P2 F/X PROMPT 2026-09-12
+------------------------------------------------
+
+Po oprave E/A interakci zustal stejny symptom u druhe skupiny kontextovych
+akci: pokud mel P2 aktivni F/X prompt, P1 nemohl utocit levym tlacitkem mysi.
+Potvrzeny memory-only zasah je
+`out/runtime/test-rerev2-p1-lmb-p2-prompt-group-ten-live.py`.
+
+Nove filtrovane misto je `0x00701886`, puvodni instrukce
+`83 BF D0 02 00 00 01` (`cmp [edi+0x2D0],1`). Nativni navrat je
+`0x0070188D` a loop-skip pro ciziho kandidata `0x0070189E`. Thunk zachova
+puvodni CMP a meni tok pouze ve skutecnem split screenu, kdy aktualni actor
+odpovida dynamicky prirazenemu P1 a kandidat patri dynamicky prirazenemu P2.
+P1 pak cizi P2 F/X kandidat preskoci, ale P2 gamepadova interakce zustane
+nativni. Neni to nahrazeni ani rollback starsiho filtru na `0x00701955`;
+obe skupiny kandidatu jsou samostatne a v produkci musi zustat obe.
+
+Uzivatel v jednom live stavu potvrdil vsechny tri regrese: P1 LMB utoci pri
+aktivnim P2 promptu, P1 E/F neprovede P2 akci a P2 A/X stale provede vlastni
+akci. Produkcni port se jmenuje `InteractionCandidateAltCode` a je instalovan
+z `InstallInput` do puvodni input allocation na slot `+0x1F00`.
+
+MIXED INPUT: P2 ACTION PROMPTY 2026-09-12
+----------------------------------------
+
+Obycene svetove/HUD interakcni prompty P2 se pri aktivnim keyboard/mouse P1
+nekdy prepnuly na E/F misto Xbox A/X. Spravne reseni neni prepis GUI spritu,
+ale vlastnikem rizene rozhodnuti v nativnim input-mode gate. Potvrzeny live
+test je `out/runtime/test-rerev2-p2-prompt-input-owner-live.py`.
+
+Peticce nativnich CMP mist (`83 B8 BC C4 15 00 01`) odpovidaji tyto gate:
+
+    0x0088DFBF  ESI  uGUIActionIcon
+    0x0088E0F9  ECX  uGUIActionIcon nebo uGUIActionIcon2
+    0x0088F57E  ESI  uGUIActionIcon2
+    0x0088FF01  ESI  uGUIActionIcon2
+    0x0088FFAF  ESI  uGUIActionIcon2
+
+Exact vtable konstanty jsou `0x013B8580` pro ActionIcon a `0x013B8A60` pro
+ActionIcon2. Ve skutecnem split screenu thunk overi controller, jeho exact
+vtable a `object+0x2AC` proti dynamickemu P2 assignmentu. Pouze pro presneho
+P2 vlastnika vynuti nativni gamepadovou vetev vycistenim ulozeneho ZF; P1,
+SP, cizi objekty, registry a ostatni flags zustavaji nativni. Produkcni
+implementace je `PromptInputCode`; pet thunku je v samostatne spustitelne
+prompt/tutorial allocation na slotech `+0x000` az `+0x400`.
+
+MIXED INPUT: ASYNCHRONNI P2 TUTORIAL PROMPTY 2026-09-12
+------------------------------------------------------
+
+Tutorial zpravy typu `<TUTR>` (napr. crouch/stand nebo healing) nepouzivaji
+stejny synchronni controller gate jako bezne ActionIcon prompty. Trace ukazal,
+ze udalost zobrazeni a rich-text parser mohou bezet na ruznych workerech
+(v potvrzene relaci show thread 9840, parser `crouch` thread 31024). Runtime
+adresy controlleru/PID z teto relace jsou diagnosticke a nesmi byt konstantou.
+
+Potvrzeny live test je
+`out/runtime/test-rerev2-p2-tutorial-parser-stack-owner-live.py`. Na obou
+input-mode CMP mistech `0x009525F7` a `0x0095265B` nese parser worker presny
+uGUITutorial controller na aktualnim `ESP+0xFC`. Po `pushfd` a `pushad` v
+thunku se stejny pointer cte z `[ESP+0x120]`. Exact tutorial vtable je
+`0x013BEDE0`. Pred instalaci se navic kontroluje parser prologue na
+`0x00951EF0`, aby se stack ABI nepouzilo na neznamem buildu.
+
+Thunk nejdrive reprodukuje puvodni `cmp [eax+0x15C4BC],1`. Jen ve skutecnem
+split screenu overi controller z parser stacku, exact vtable a jeho
+`controller+0x2AC` proti dynamickemu P2. Pouze tehdy vycisti ulozeny ZF a
+vybere nativni gamepadovou variantu tutorial ikony. P1 ma samostatnou tutorial
+instanci, proto jeho keyboard/mouse ikony zustavaji podle jeho aktivniho
+zarizeni. Uzivatel live potvrdil spravny P2 gamepad tutorial i zachovane P1
+chovani. Produkcni implementace je `TutorialPromptCode`; dva thunky jsou v
+prompt/tutorial allocation na `+0x500` a `+0x600`.
+
+PRODUKCNI PORT, TESTY A NASAZENI 0.1.9 2026-09-12
+-------------------------------------------------
+
+`InstallInput` pred alokaci a patchovanim kontroluje puvodni byty noveho
+group-ten kandidata, vsech peti ActionIcon gate, obou tutorial gate i exact
+tutorial parser prologue. Puvodni 0x3000 input code/state oblast zustala
+oddelena od nove 0x1000 prompt/tutorial executable oblasti. Obe oblasti jsou
+nejdrive naplneny a prepnute na executable/read-only; teprve potom se zapisuji
+site redirecty. Selhani guardu nebo alokace proto neaktivuje castecny novy fix.
+
+`coop_native_dump.cpp` exportuje nove blob-y a
+`tools/test-rerev2-coop-permanent.py` je emuluje pres Unicorn. Offline sada
+prosla 15/15 testu. Pokryva oba candidate filtry, vsech pet beznych prompt gate
+i oba asynchronni tutorial gate: P1/P2, obracene dynamicke assignmenty,
+split/non-split, cizi nebo chybejici controllery, vstupni mod, branch targets a
+zachovani registru/flags. Samostatne byte-for-byte porovnani potvrdilo, ze C++
+generatory pro vsechny tri nove funkce presne odpovidaji uzivatelsky overenym
+memory-only Python builderum.
+
+Release artefakt a nasazeny soubor:
+
+    FileVersion     0.1.9
+    ProductVersion  0.1.9-8abdca882
+    Size            1644544 bytes
+    SHA-256         4D1CD93C7F270B272C4F4DFBF6C09E3DC1579672EFD624336F7C9B0A63014B61
+
+Hra byla pred nasazenim ukoncena. Do herniho adresare byl zkopirovan pouze
+`scripts\\ResidentEvilRevelations2.FusionFix.asi`; existujici INI nebylo
+zmeneno. Hash nasazeneho ASI se presne shoduje s Release artefaktem. Predchozi
+0.1.8 je obnovitelna ze zalohy:
+
+    G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\scripts\.fusionfix-backups\ResidentEvilRevelations2.FusionFix.asi.20260912-011030-228.bak
+    SHA-256 94A62B0C7C50F7572FA46EE057FCAE349D4CBA0B04A1EE0425FCA4579E0E0844
+
+Build 0.1.9 nebyl odeslan na GitHub. Pred pushem je nutny cisty herni test
+zkompilovaneho ASI, zejmena P1/P2 E-A a F-X interakce, P1 LMB utok pri obou
+typech P2 promptu, bezne P2 ActionIcon ikony, oddelene P1/P2 tutorial zpravy a
+kratka regrese FMV/menu/titulku, cutscene kamery a single/dual monitor vetvi.
+
+VYKON A MALA CUTSCENA S MOIROU - LIVE POTVRZENO 2026-09-12
+---------------------------------------------------------
+
+Vykonovy A/B test potvrdil, ze nativni funkce `0x00CC91C0` vytvari kazdy frame
+`D3DQUERYTYPE_EVENT` a ceka v `GetData(..., D3DGETDATA_FLUSH)`. Docasny navrat
+`C3 90 90 90` zvysil v realnem dual-monitor split screenu aplikacni Present
+frekvenci priblizne z 105.6 na 158.6/s bez pozorovaneho obrazoveho artefaktu.
+Distribucni i herni INI proto maji `DisableCreateQuery=1`; pouziva se existujici
+upstream bypass, nikoli nova produkcni funkce.
+
+Dlouhy monitoring 995.1 s nameril prumer 163.52 Present/s, prumerny p99 frame
+time 8.53 ms, nejhorsi p99 15.06 ms, prumerne 4.02 CPU jadra a GPU prumer 68.85 %
+(maximum 72.51 %). Working set nerostl monotonne. Nativni pokus o cache
+redundantnich `SetTexture`/`SetSamplerState` volani zpusobil okamzity access
+violation a byl definitivne zamitnut; neni v ASI ani v konfiguraci.
+
+Prvni kratka in-engine scena se zranenou zenou pouziva jiny kamerovy mechanismus
+nez dlouhe skriptovane sceny. Pokud zena dojde k Moire, engine spravne prepne do
+single-view modu 0 a vlozi Moirinu beznou kameru do `graphics+0x34`. Trace:
+
+    Claire gameplay camera     0x2A498060, vtable 0x01264F30
+    Moira gameplay camera      0x2A4D8060, vtable 0x01264F30
+    pred vlastnim W/2 rebuildem screen0 = Moira
+    po vlastnim W/2 rebuildem   screen0 = Claire
+
+Heap adresy jsou pouze z relace PID 33092 a do produkce nepatri. Stabilni fakta
+jsou `Screen0CameraOffset=0x34`, normal-camera vtable `0x01264F30`, mode 0 a
+event-camera vtable `0x01264FE0`.
+
+Pricinou byl `ApplyNativeLeftLayout()`: ochrana z 0.1.5 zachovavala jen
+`uEventMotionCamera`, kterou pouziva dlouha cutscena. Docasny mode-2 rebuild proto
+Moirinu obycejnou kameru znovu svazal s camera mappingem 0 (Claire). Potvrzeny
+memory-only test `tools/test-rerev2-small-cutscene-camera-live.py` zachoval pres
+presny vlastni `UpdateLayout` call hrou jiz vybrany screen0 pointer. Uzivatel
+vizualne potvrdil, ze oba finalne zrcadlene viewporty ukazaly Moiru se zenou.
+
+Produkce 0.1.10 proto zachovava:
+
+- vzdy presne identifikovanou `uEventMotionCamera` jako dosud;
+- normalni kameru `0x01264F30` pouze pokud byl puvodni native mode presne 0;
+- zadnou obecnou gameplay kameru v mode 1/2 ani jinou neznamou tridu.
+
+Oprava neobsahuje rozliseni, offset ani identitu konkretni postavy. Zachovava
+volbu, kterou uz udelala hra, takze Claire zustava Claire a Moira zustava Moira.
+Finalni mirror pak stejnou single-view kameru zkopiruje na oba monitory.
+
+PRODUKCNI BUILD A NASAZENI 0.1.10 2026-09-12
+-------------------------------------------
+
+Live potvrzena oprava male cutsceny byla prenesena do
+`source/ResidentEvilRevelations2.FusionFix/dllmain.cpp`. Produkcni helper
+zachovava normalni kameru jen v puvodnim native mode 0; dosavadni zachovani
+event kamery zustalo beze zmeny. Staticka a emulacni regresni sada prosla
+16/16 testu vcetne nove kontroly tohoto uzkeho mode-0 scope.
+
+Release artefakt a nasazeny soubor:
+
+    FileVersion     0.1.10
+    ProductVersion  0.1.10-8abdca882
+    Size            1644544 bytes
+    SHA-256         C2A67DF426430964F77257013E0A5477C146DDB6100F40DA89E04A22B06A726A
+
+Pred nasazenim byla hra ukoncena. Nasazen byl pouze
+`scripts\\ResidentEvilRevelations2.FusionFix.asi`; existujici herni INI se
+neprepisovalo. Zdrojovy a nasazeny SHA-256 jsou shodne. Posledni platna zaloha
+predchozi verze je:
+
+    G:\Steam\steamapps\common\RESIDENT EVIL REVELATIONS 2\scripts\.fusionfix-backups\ResidentEvilRevelations2.FusionFix.asi.20260912-134335-367.bak
+
+V hernim INI zustava aktivni pouze overena vykonova volba
+`DisableCreateQuery=1`. Pokusna texture/sampler state cache neni soucasti ASI,
+INI ani bezici konfigurace.
+
+VYKON 2026: ZAMITNUTA STATE CACHE A DALSI SMER 2026-09-12
+-------------------------------------------------------
+
+Po buildu 0.1.10 probehl jeste oddeleny memory-only test D3D9 state cache.
+Puvodni Frida CModule experiment nebyl spolehlivy: prvni verze mela omylem
+state-block vtable sloty posunute o jednu pozici a i po jejich oprave padal
+samotny CModule `SetTexture` wrapper s `0xc0000005`. Tento mechanismus proto
+nesmi byt prenesen do produkce.
+
+Pro cisty test byl pouzit samostatny nativni x86 MSVC probe pouze v pameti.
+Cache se invalidovala na zacatku kazdeho frame, pri jakemkoli state-block
+volani se mela sama vypnout a po casovem testu obnovila puvodni vtable. V
+testovane relaci nenastal zadny state-block event ani obrazovy problem:
+
+    SetTexture       0 / 1 085 995 redundantnich volani (0.0 %)
+    SetSamplerState  25 970 389 / 43 197 966 preskoceno (60.1 %)
+
+Ani vysoka sampler skip-rate neprinesla realny vykonovy zisk. Srovnatelne
+gameplay intervaly z `rerev2-texture-cache-performance-20260912-200316.jsonl`:
+
+    bez cache pred testem    182.77 Present/s, prumerny p99 7.72 ms
+    sampler cache aktivni    174.52 Present/s, prumerny p99 8.09 ms
+    bez cache po testu       178.79 Present/s, prumerny p99 7.74 ms
+
+Rozdil obsahuje beznou variabilitu sceny, ale nedava zadny dukaz pro zlepseni;
+cache naopak pridava wrapper a kontrolni rezii. Texture/sampler state cache je
+proto zamitnuta a neni v ASI, release INI ani hernim INI. Pozdeji hlasene
+zdani zaseknuti pri zmene lokace bylo zpusobeno ztratou focusu Fakefinity
+presenteru, nikoli cache, ale vykonovy zaver se tim nemeni.
+
+Pro dalsi vykonovou kapitolu je doporucene poradi:
+
+1. Pouzit ETW/PresentMon v realnem dual-monitor co-op gameplayi a oddelit
+   CPU Busy, CPU Wait a GPU Busy. Dosavadni data (RX 7800 XT prumerne asi
+   69 %, proces asi 4 CPU jadra a jeden prakticky saturovany thread) ukazuji
+   spise na D3D9 CPU/driver submission nebo dalsi synchronizaci nez na cisty
+   GPU limit.
+2. Read-only profilovat vsechny dalsi `CreateQuery/Issue/GetData`,
+   `GetRenderTargetData`, GPU->CPU readbacky a `Lock/LockRect` dynamickych
+   vertex/index bufferu a textur vcetne flags a QPC trvani.
+3. Jen pokud trace prokaze konkretni problem, memory-only otestovat spravne
+   `D3DLOCK_DISCARD`/`D3DLOCK_NOOVERWRITE` pro presne identifikovane streaming
+   buffery. Zadny globalni prepis lock flags.
+4. Zmerit opakovane vytvareni identickych vertex/pixel shaderu a resource
+   churn. Cache podle bytecode CRC ma smysl pouze pri potvrzenych duplicitach;
+   je to kandidat hlavne na odstraneni traversal/cutscene stutteru.
+5. Volitelne A/B otestovat 32bit DXVK D3D9 na modernim AMD GPU. Nesmí se
+   zasahovat do Fakefinity; pro soucasny presenter by byl nutny samostatne
+   navrzeny chainloading, pro realne dual monitory muze jit o oddeleny
+   volitelny backend.
+6. D3D9Ex/flip-model povazovat za nizsi prioritu pro borderless/DWM a focus
+   chovani, ne za ocekavany velky split-screen FPS fix.
+7. Volitelny presny frame limiter muze zlepsit frame pacing na zobrazovaci
+   frekvenci monitoru, ale nezvysuje maximalni FPS a nesmi byt vydavan za
+   vykonovy zisk.
+
+V produkci zustava pouze live potvrzeny `DisableCreateQuery=1`. Ten odstranil
+skutecny per-frame GPU event-query stall a zvysil Present frekvenci priblizne
+z 105.6 na 158.6/s bez pozorovaneho obrazoveho problemu.

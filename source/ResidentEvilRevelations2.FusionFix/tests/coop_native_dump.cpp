@@ -15,6 +15,39 @@ int main()
     using namespace rev2coop;
     for (size_t i = 0; i < InputGates.size(); ++i)
         print("input" + std::to_string(i), InputCode(0x2000000, 0x2002000, InputGates[i]));
+    print("interactionCandidate", InteractionCandidateCode(0x2000000));
+    print("interactionCandidateAlt", InteractionCandidateAltCode(0x2000000));
+    for (size_t i = 0; i < PromptInputGates.size(); ++i)
+        print("promptInput" + std::to_string(i),
+            PromptInputCode(0x2000000, PromptInputGates[i]));
+    for (size_t i = 0; i < TutorialPromptSites.size(); ++i)
+        print("tutorialPrompt" + std::to_string(i),
+            TutorialPromptCode(0x2000000, TutorialPromptSites[i]));
+    for (size_t i = 0; i < 6; ++i)
+    {
+        constexpr std::array<std::array<uint32_t, 6>, 6> cases = {{
+            {FileTextVtable, FileTextActiveMask, 1, 1, 3840, 1080},
+            {FileTextVtable, FileTextActiveMask, 1, 0, 3840, 1080},
+            {FileTextVtable, FileTextActiveMask, 0, 1, 3840, 1080},
+            {FileTextVtable + 4, FileTextActiveMask, 1, 1, 3840, 1080},
+            {FileTextVtable, 0, 1, 1, 3840, 1080},
+            {FileTextVtable, FileTextActiveMask, 1, 1, 3441, 1440},
+        }};
+        Code c;
+        c.word(ShouldReplayFileText(cases[i][0], cases[i][1],
+            cases[i][2] != 0, cases[i][3] != 0, cases[i][4], cases[i][5]) ? 1 : 0);
+        print("fileTextReplay" + std::to_string(i), c.bytes);
+    }
+    {
+        const FileTextReplayPosition position{37.5f, 3840};
+        auto value = position.ReplayX();
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        Code shifted; shifted.word(bits); print("fileTextShift", shifted.bytes);
+        position.Restore(value);
+        std::memcpy(&bits, &value, sizeof(bits));
+        Code restored; restored.word(bits); print("fileTextRestore", restored.bytes);
+    }
     print("geometry", GeometryCode(0x2000000, 0x2002000));
     print("capture", CaptureCode(0x2000000, 0x2002000));
     constexpr uint32_t menu = 0x2100000;

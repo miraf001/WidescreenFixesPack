@@ -56,6 +56,7 @@ GATES = (
     (0xA1824D, "edi", EAX_MODE),
     (0xA1838F, "ebx", EAX_MODE),
     (0xA186E6, "edi", EAX_MODE),
+    (0x40EF84, "ebp", EAX_MODE), # interactable selected for this actor/player
 )
 CODE_SIZE = ((len(GATES) * 0x100 + 4095) // 4096) * 4096
 GUARDS = tuple((a, b) for a, b in base.GUARDS if a != 0xA155A5) + (
@@ -92,7 +93,7 @@ def make_thunk(address, counter, gate):
     emit("9c 60") # PUSHFD, PUSHAD (saved comparison flags at [esp+32])
     branch("0f 85", "native")
     emit({"eax": "8b f0", "ecx": "8b f1", "ebx": "8b f3",
-          "esi": "8b f6", "edi": "8b f7"}[actor])
+          "esi": "8b f6", "edi": "8b f7", "ebp": "8b f5"}[actor])
     emit("a1")
     code.extend(hud.u32(hud.MODE_POINTER))
     emit("85 c0")

@@ -1,9 +1,12 @@
 ﻿#include "stdafx.h"
 #include "LEDEffects.h"
+#include "CoopNativeCode.h"
 #include <d3d9.h>
 #include <d3dx9.h>
 #pragma comment(lib, "d3dx9.lib")
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <xinput.h>
 
@@ -168,12 +171,23 @@ enum GUI
 static IDirect3DVertexShader9* g_screenVertexShader = nullptr;
 static IDirect3DPixelShader9* g_wmvYuvDecodePixelShader = nullptr;
 static IDirect3DVertexShader9* g_myScreenVertexShader = nullptr;
+static SafetyHookInline gDualMonitorResetHook = {};
+static SafetyHookInline gDualMonitorPresentHook = {};
+static volatile LONG gDualMonitorPresentSerial = 0;
+static volatile LONG gDualMonitorLastFmvPresentSerial =
+    (std::numeric_limits<LONG>::min)() / 2;
+static volatile LONG gDualMonitorLastFullCanvasBioSubtitlePresentSerial =
+    (std::numeric_limits<LONG>::min)() / 2;
 static thread_local float gSubtitlePassTranslationXNdc = 0.0f;
 static thread_local float gSubtitlePassOffsetX = 0.0f;
 // Only the second, replayed dual-monitor pause-menu pass sets this. Keeping it
 // thread-local avoids touching a controller's native position while another
 // GUI worker might be reading it.
 static thread_local float gDualGuiPassTranslationXNdc = 0.0f;
+// The FileText wrapper calls the shared renderer directly, but retain an
+// explicit per-thread guard so nested GUI traversal can never duplicate the
+// replay or observe it as a fresh left-side draw.
+static thread_local bool gDualFileTextReplayActive = false;
 static volatile LONG gActivePauseCommonMenu = 0;
 
 void LoadHudTuningFromIni()
@@ -206,7 +220,12 @@ void LoadHudTuningFromIni()
         fSubtitleScaleX, fSubtitleScaleY);)
 }
 
-namespace rev2coop { inline void PollBridgeCapture(); }
+namespace rev2coop
+{
+    inline void PollBridgeCapture();
+    inline void Report(const char* message);
+}
+namespace dualmonitor { void PollInstall(); }
 
 DWORD WINAPI IniHotkeyThread(LPVOID)
 {
@@ -219,6 +238,7 @@ DWORD WINAPI IniHotkeyThread(LPVOID)
             OutputDebugStringA("[HUD] Reloaded values from INI via F5\n");
         }
 
+        dualmonitor::PollInstall();
         rev2coop::PollBridgeCapture();
         Sleep(20); // Bridge F9 synchronization stays off the game/render thread.
     }
@@ -295,6 +315,58 @@ float GetDiff()
         return GetAspectRatio() / defaultAspectRatio;
     }
 }
+
+static bool IsRecentDualMonitorFmvFrame()
+{
+    if (!bDualMonitorMode || IsSplitScreenActive())
+        return false;
+
+    const auto presentSerial =
+        InterlockedCompareExchange(&gDualMonitorPresentSerial, 0, 0);
+    const auto fmvSerial =
+        InterlockedCompareExchange(&gDualMonitorLastFmvPresentSerial, 0, 0);
+    const auto delta = presentSerial - fmvSerial;
+    return delta >= 0 && delta <= 1;
+}
+
+static bool IsRecentDualMonitorFullCanvasBioSubtitleFrame()
+{
+    if (!bDualMonitorMode || IsSplitScreenActive())
+        return false;
+
+    const auto presentSerial =
+        InterlockedCompareExchange(&gDualMonitorPresentSerial, 0, 0);
+    const auto subtitleSerial = InterlockedCompareExchange(
+        &gDualMonitorLastFullCanvasBioSubtitlePresentSerial, 0, 0);
+    const auto delta = presentSerial - subtitleSerial;
+    return delta >= 0 && delta <= 1;
+}
+
+static bool GetPhysicalRendererSize(uint32_t& width, uint32_t& height)
+{
+    constexpr uintptr_t rendererPointer = 0x015E0388;
+    constexpr uintptr_t rendererWidthOffset = 0xB8;
+    constexpr uintptr_t rendererHeightOffset = 0xBC;
+
+    width = 0;
+    height = 0;
+    if (IsBadReadPtr((void*)rendererPointer, sizeof(uintptr_t)))
+        return false;
+
+    const auto renderer = *reinterpret_cast<uintptr_t*>(rendererPointer);
+    if (!renderer ||
+        IsBadReadPtr((void*)(renderer + rendererHeightOffset), sizeof(uint32_t)))
+    {
+        return false;
+    }
+
+    width = *reinterpret_cast<uint32_t*>(renderer + rendererWidthOffset);
+    height = *reinterpret_cast<uint32_t*>(renderer + rendererHeightOffset);
+    return width >= 2 && (width & 1) == 0 && height != 0;
+}
+
+static bool IsBioSubtitleController(uintptr_t object);
+static uintptr_t GetSubtitleController(uintptr_t object);
 
 void __fastcall sub_96C410(int _this, int edx, int a2, int a3)
 {
@@ -535,6 +607,75 @@ void __fastcall sub_E18040(int _this, int edx, int a2)
                 v13[1] = v15 * v5;
                 v13[2] = (float)(v14 * v6) - (1.0f / GetDiff());
                 v13[3] = (float)(v15 * v7) + 1.0f;
+            }
+
+            // Active FMVs are drawn from a full-canvas subtitle transform but
+            // their video is mapped into the left monitor. Apply that same
+            // horizontal scale once to their subtitle transform.
+            if (edx == SUBTITLES && IsRecentDualMonitorFmvFrame())
+            {
+                constexpr float equalMonitorLeftFraction = 1.0f / 2.0f;
+                v13[0] *= equalMonitorLeftFraction;
+            }
+
+            if (edx == SUBTITLES && bDualMonitorMode &&
+                !IsSplitScreenActive())
+            {
+                uint32_t physicalWidth = 0;
+                uint32_t physicalHeight = 0;
+                const auto subtitleController =
+                    GetSubtitleController((uintptr_t)_this);
+                const bool isBioSubtitle =
+                    IsBioSubtitleController(subtitleController);
+                const auto rawViewportWidth = v28 - v19;
+                const bool hasPhysicalCanvas = GetPhysicalRendererSize(
+                    physicalWidth, physicalHeight);
+                const bool isFullCanvas = hasPhysicalCanvas &&
+                    rawViewportWidth > static_cast<int32_t>(physicalWidth / 2 + 1);
+
+                // A full-canvas uBioGUISubtitles pass is the stable marker for
+                // the long in-engine cutscene path. Ordinary SP has only a
+                // full-canvas TextVoice pass; the short in-engine scene is
+                // already W/2-local. Keep the marker for the current/previous
+                // Present because TextVoice and Bio can arrive in either order.
+                if (isFullCanvas && isBioSubtitle)
+                {
+                    InterlockedExchange(
+                        &gDualMonitorLastFullCanvasBioSubtitlePresentSerial,
+                        InterlockedCompareExchange(
+                            &gDualMonitorPresentSerial, 0, 0));
+                }
+
+                if (isFullCanvas &&
+                    IsRecentDualMonitorFullCanvasBioSubtitleFrame())
+                {
+                    const float absoluteScaleY = std::fabs(v13[1]);
+                    if (absoluteScaleY > 0.000000001f)
+                    {
+                        const float observedRatio =
+                            std::fabs(v13[0]) / absoluteScaleY;
+                        // Bio uses Capcom's canonical 1280x720 transform;
+                        // TextVoice uses the current physical canvas. Compare
+                        // ratios rather than pixel constants so the guard also
+                        // works at other equal-monitor resolutions.
+                        const float expectedFullRatio = isBioSubtitle
+                            ? (720.0f / 1280.0f)
+                            : (static_cast<float>(physicalHeight) /
+                               static_cast<float>(physicalWidth));
+                        const float expectedHalfRatio =
+                            expectedFullRatio * 0.5f;
+                        const bool alreadyLeftScaled =
+                            std::fabs(observedRatio - expectedHalfRatio) <
+                            std::fabs(observedRatio - expectedFullRatio);
+
+                        // During an active FMV the block above already applied
+                        // 0.5, so do not halve it again. A paused FMV and the
+                        // long in-engine cutscene have the unscaled full ratio
+                        // and receive exactly one correction here.
+                        if (!alreadyLeftScaled)
+                            v13[0] *= 0.5f;
+                    }
+                }
             }
 
             // The dual-monitor pause wrappers replay an otherwise native
@@ -1110,6 +1251,72 @@ void __fastcall sub_E18040_rescale(int _this, int edx, int a2)
     return sub_E18040(_this, RESCALE, a2);
 }
 
+void __fastcall sub_E18040_action_icon2(int _this, int edx, int a2)
+{
+    // Keep the original SP transform path. Only true split screen bypasses
+    // FusionFix's generic HUD rescale, whose 0.8 X scale and +0.25 H offset
+    // made this fixed prompt too small, too far left and partly off-screen.
+    if (!IsSplitScreenActive())
+        return sub_E18040_rescale(_this, edx, a2);
+
+    return sub_E18040(_this, edx, a2);
+}
+
+static bool IsActiveDualMonitorFileText(uintptr_t object,
+    uint32_t physicalWidth, uint32_t physicalHeight)
+{
+    constexpr uintptr_t guiStateFlagsOffset = 0x148;
+    if (!object || IsBadReadPtr(reinterpret_cast<void*>(object),
+            guiStateFlagsOffset + sizeof(uint32_t)))
+    {
+        return false;
+    }
+
+    return rev2coop::ShouldReplayFileText(
+        *reinterpret_cast<uint32_t*>(object),
+        *reinterpret_cast<uint32_t*>(object + guiStateFlagsOffset),
+        bDualMonitorMode, IsSplitScreenActive(), physicalWidth, physicalHeight);
+}
+
+void __fastcall sub_E18040_file_text(int _this, int edx, int a2)
+{
+    constexpr uintptr_t localXOffset = 0x40;
+    const auto object = static_cast<uintptr_t>(_this);
+    uint32_t physicalWidth = 0;
+    uint32_t physicalHeight = 0;
+
+    if (gDualFileTextReplayActive ||
+        !GetPhysicalRendererSize(physicalWidth, physicalHeight) ||
+        !IsActiveDualMonitorFileText(object, physicalWidth, physicalHeight))
+    {
+        return sub_E18040_rescale(_this, edx, a2);
+    }
+
+    // Match the confirmed live ordering exactly: remember the source X before
+    // the normal left draw, replay at physicalWidth/2, then restore the source
+    // controller synchronously. Cached/inactive FileText instances never enter
+    // this path, and non-split SP is already mirrored at Present.
+    auto& localX = *reinterpret_cast<float*>(object + localXOffset);
+    const rev2coop::FileTextReplayPosition position{localX, physicalWidth};
+    sub_E18040_rescale(_this, edx, a2);
+
+    gDualFileTextReplayActive = true;
+    localX = position.ReplayX();
+    sub_E18040_rescale(_this, edx, a2);
+    position.Restore(localX);
+    gDualFileTextReplayActive = false;
+}
+
+static bool InstallDualMonitorFileText()
+{
+    constexpr uintptr_t nativeRescaleEntry = 0x00E18040;
+    if (*reinterpret_cast<uintptr_t*>(uGUIFileText) != nativeRescaleEntry)
+        return false;
+
+    injector::WriteMemory(uGUIFileText, sub_E18040_file_text, true);
+    return true;
+}
+
 // All three duplicated pause elements are native full-canvas GUI controllers.
 // The checks below deliberately identify their *semantic* pause relationship,
 // rather than retaining any heap address discovered during a live session.
@@ -1147,8 +1354,19 @@ static bool IsActiveFullCanvasGui(uintptr_t object, uintptr_t drawSlot)
     }
 
     const auto* bounds = reinterpret_cast<const int32_t*>(object + cachedBoundsOffset);
-    return bounds[0] == 0 && bounds[1] == 0 &&
+    const bool canonicalBounds = bounds[0] == 0 && bounds[1] == 0 &&
         bounds[2] == GetResX() && bounds[3] == GetResY();
+    if (canonicalBounds)
+        return true;
+
+    // The translated replay can update the controller's cached bounds even
+    // though its source position remains untouched. Accept that exact dynamic
+    // cache as well, otherwise the right copy is rejected on the next frame
+    // and the pause menu visibly renders only every other frame.
+    const auto splitWidth = GetCurrentSplitScreenResX();
+    return bDualMonitorMode && IsSplitScreenActive() && splitWidth > 0 &&
+        bounds[0] == splitWidth && bounds[1] == 0 &&
+        bounds[2] == splitWidth + GetResX() && bounds[3] == GetResY();
 }
 
 static bool IsPauseCommonMenu(uintptr_t object)
@@ -1196,11 +1414,23 @@ static void RenderPauseGuiForDualMonitors(int object, int edx, int a2)
     if (!IsDualMonitorPauseReplayActive())
         return;
 
+    constexpr uintptr_t cachedBoundsOffset = 0x168;
+    auto* cachedBounds = reinterpret_cast<int32_t*>(
+        static_cast<uintptr_t>(object) + cachedBoundsOffset);
+    const std::array<int32_t, 4> originalCachedBounds = {
+        cachedBounds[0], cachedBounds[1], cachedBounds[2], cachedBounds[3]
+    };
+
     const auto originalTranslation = gDualGuiPassTranslationXNdc;
     gDualGuiPassTranslationXNdc = originalTranslation +
         GetDualMonitorPassTranslationXNdc();
     sub_E18040_rescale(object, edx, a2);
     gDualGuiPassTranslationXNdc = originalTranslation;
+
+    // sub_E18040 queues its transform but also leaves the translated bounds
+    // in the shared controller cache. Restore the left/native cache
+    // immediately so layout tests and the next frame see canonical state.
+    std::copy(originalCachedBounds.begin(), originalCachedBounds.end(), cachedBounds);
 }
 
 void __fastcall sub_E18040_pause_common_menu(int _this, int edx, int a2)
@@ -1250,6 +1480,27 @@ static bool InstallDualMonitorPauseGui()
     injector::WriteMemory(uGUICommonMenu, sub_E18040_pause_common_menu, true);
     injector::WriteMemory(uGUIPurpose, sub_E18040_pause_purpose, true);
     injector::WriteMemory(uGUIGuide, sub_E18040_pause_guide, true);
+    return true;
+}
+
+static bool InstallFixedHudActionPrompt()
+{
+    constexpr uintptr_t layoutTestAddress = 0x0088F944;
+    constexpr uint8_t expectedLayoutTest[] = { 0x84, 0xC0 }; // TEST AL, AL
+    constexpr uintptr_t nativeRescaleEntry = 0x00E18040;
+
+    if (std::memcmp(reinterpret_cast<const void*>(layoutTestAddress),
+            expectedLayoutTest, sizeof(expectedLayoutTest)) != 0 ||
+        *reinterpret_cast<uintptr_t*>(uGUIActionIcon2) != nativeRescaleEntry)
+    {
+        return false;
+    }
+
+    // 30 C0 is XOR AL,AL: select this controller's native SP-local layout.
+    // Change only the first byte so the original two-byte instruction length
+    // and all following branch addresses remain unchanged.
+    injector::WriteMemory<uint8_t>(layoutTestAddress, 0x30, true);
+    injector::WriteMemory(uGUIActionIcon2, sub_E18040_action_icon2, true);
     return true;
 }
 
@@ -1382,13 +1633,14 @@ IDirect3DVertexShader9* __stdcall CreateVertexShaderHook(const DWORD** a1)
             
             float2 fScreenHalfPixelOffset : register(c1);
             float fHorizontalAspectScale : register(c20);
+            float fHorizontalOffset : register(c21);
             
             VS_OUTPUT main(VS_INPUT input)
             {
                 VS_OUTPUT output;
             
                 output.position = float4(
-                  -fScreenHalfPixelOffset.x + input.position.x * fHorizontalAspectScale,
+                  -fScreenHalfPixelOffset.x + input.position.x * fHorizontalAspectScale + fHorizontalOffset,
                   fScreenHalfPixelOffset.y + input.position.y,
                   0.0,
                   1.0);
@@ -1457,6 +1709,546 @@ void __stdcall SplitScreenSetupBottom(void* a1, int32_t* a2)
     a2[2] = (int32_t)(720.0f * GetAspectRatio());         // X end (full width)
     a2[3] = (int32_t)(720.0f);                           // Y end (full height)
     return injector::stdcall<void(void*, int32_t*)>::call(0x4AC310, a1, a2);
+}
+
+namespace dualmonitor
+{
+    enum class InstallAttempt
+    {
+        NotReady,
+        Installed,
+        PermanentFailure
+    };
+
+    constexpr uintptr_t GraphicsPointer = 0x015DE88C;
+    constexpr uintptr_t RendererPointer = 0x015E0388;
+    constexpr uintptr_t SplitControllerPointer = 0x0157AE00;
+    constexpr uintptr_t UpdateLayoutAddress = 0x004AE570;
+    constexpr uintptr_t NativeRectConverterAddress = 0x004AC310;
+    constexpr uintptr_t NativeRectConverterCall = 0x004AE831;
+    constexpr uintptr_t Screen0CameraOffset = 0x34;
+    constexpr uintptr_t Screen0RectOffset = 0x48;
+    constexpr uintptr_t Screen1FallbackRectOffset = 0x1D8;
+    constexpr uintptr_t CachedModeOffset = 0xCE0;
+    constexpr uintptr_t LayoutDirtyOffset = 0xD0C;
+    constexpr uintptr_t ActiveRectOffset = 0xD20;
+    constexpr uintptr_t RendererWidthOffset = 0xB8;
+    constexpr uintptr_t RendererHeightOffset = 0xBC;
+    constexpr uintptr_t SplitModeOffset = 0x8F4;
+    constexpr uintptr_t NormalCameraVtable = 0x01264F30;
+    constexpr uintptr_t EventMotionCameraVtable = 0x01264FE0;
+    constexpr UINT BackbufferValidationInterval = 300;
+
+    struct RuntimeState
+    {
+        IDirect3DDevice9* device = nullptr;
+        IDirect3DSurface9* backbuffer = nullptr;
+        IDirect3DSurface9* intermediate = nullptr;
+        UINT width = 0;
+        UINT height = 0;
+        D3DFORMAT format = D3DFMT_UNKNOWN;
+        UINT validationCountdown = 0;
+        bool layoutInitialized = false;
+        bool initialLayoutPending = true;
+        bool previousSplit = false;
+        bool dualWasEnabled = false;
+    };
+
+    static RuntimeState gState;
+    static volatile LONG gInstallRequested = 0;
+    static volatile LONG gInstallFinished = 0;
+    static volatile LONG gInstallBusy = 0;
+    static ULONGLONG gNextInstallAttempt = 0;
+
+    static uint8_t* GetGraphics()
+    {
+        return reinterpret_cast<uint8_t*>(
+            *reinterpret_cast<uintptr_t*>(GraphicsPointer));
+    }
+
+    static uint8_t* GetRenderer()
+    {
+        return reinterpret_cast<uint8_t*>(
+            *reinterpret_cast<uintptr_t*>(RendererPointer));
+    }
+
+    static uint8_t* GetSplitController()
+    {
+        return reinterpret_cast<uint8_t*>(
+            *reinterpret_cast<uintptr_t*>(SplitControllerPointer));
+    }
+
+    static RECT ReadRect(uint8_t* address)
+    {
+        return *reinterpret_cast<RECT*>(address);
+    }
+
+    static void WriteRect(uint8_t* address, LONG left, LONG top,
+        LONG right, LONG bottom)
+    {
+        *reinterpret_cast<RECT*>(address) = { left, top, right, bottom };
+    }
+
+    static bool IsRect(uint8_t* address, LONG left, LONG top,
+        LONG right, LONG bottom)
+    {
+        const auto rect = ReadRect(address);
+        return rect.left == left && rect.top == top &&
+            rect.right == right && rect.bottom == bottom;
+    }
+
+    static void ReleaseSurfaces()
+    {
+        if (gState.intermediate)
+        {
+            gState.intermediate->Release();
+            gState.intermediate = nullptr;
+        }
+        if (gState.backbuffer)
+        {
+            gState.backbuffer->Release();
+            gState.backbuffer = nullptr;
+        }
+    }
+
+    static bool RefreshBackbuffer(bool force)
+    {
+        if (!gState.device || (!force && gState.backbuffer))
+            return gState.backbuffer != nullptr;
+
+        IDirect3DSurface9* current = nullptr;
+        if (FAILED(gState.device->GetBackBuffer(
+                0, 0, D3DBACKBUFFER_TYPE_MONO, &current)) || !current)
+        {
+            return false;
+        }
+
+        if (current == gState.backbuffer)
+        {
+            // GetBackBuffer returned an additional COM reference.
+            current->Release();
+            gState.validationCountdown = BackbufferValidationInterval;
+            return true;
+        }
+
+        D3DSURFACE_DESC description = {};
+        if (FAILED(current->GetDesc(&description)) ||
+            description.Width < 2 || (description.Width & 1) != 0 ||
+            description.Height == 0)
+        {
+            current->Release();
+            return false;
+        }
+
+        ReleaseSurfaces();
+        gState.backbuffer = current;
+        gState.width = description.Width;
+        gState.height = description.Height;
+        gState.format = description.Format;
+        gState.layoutInitialized = false;
+        gState.initialLayoutPending = true;
+        gState.validationCountdown = BackbufferValidationInterval;
+        return true;
+    }
+
+    static bool EnsureIntermediate()
+    {
+        if (gState.intermediate)
+            return true;
+
+        return SUCCEEDED(gState.device->CreateRenderTarget(
+            gState.width / 2, gState.height, gState.format,
+            D3DMULTISAMPLE_NONE, 0, FALSE, &gState.intermediate, nullptr)) &&
+            gState.intermediate != nullptr;
+    }
+
+    static void RestoreFullLogicalCaches()
+    {
+        auto renderer = GetRenderer();
+        if (!renderer || !gState.width || !gState.height)
+            return;
+
+        *reinterpret_cast<uint32_t*>(renderer + RendererWidthOffset) = gState.width;
+        *reinterpret_cast<uint32_t*>(renderer + RendererHeightOffset) = gState.height;
+        ResX = static_cast<int32_t>(gState.width);
+        ResY = static_cast<int32_t>(gState.height);
+    }
+
+    static void ApplyHalfLogicalState()
+    {
+        auto renderer = GetRenderer();
+        auto graphics = GetGraphics();
+        if (!renderer || !graphics || !gState.width || !gState.height)
+            return;
+
+        // The physical renderer and all render targets remain full-size.
+        // Only FusionFix's logical GUI/input width and the native fallback
+        // screen record describe one equal monitor.
+        *reinterpret_cast<uint32_t*>(renderer + RendererWidthOffset) = gState.width;
+        *reinterpret_cast<uint32_t*>(renderer + RendererHeightOffset) = gState.height;
+        ResX = static_cast<int32_t>(gState.width / 2);
+        ResY = static_cast<int32_t>(gState.height);
+        WriteRect(graphics + Screen1FallbackRectOffset,
+            0, 0, static_cast<LONG>(gState.width / 2),
+            static_cast<LONG>(gState.height));
+    }
+
+    static void RebuildCurrentNativeLayout()
+    {
+        auto graphics = GetGraphics();
+        if (!graphics)
+            return;
+
+        *reinterpret_cast<uint8_t*>(graphics + LayoutDirtyOffset) = 1;
+        reinterpret_cast<void(__thiscall*)(void*)>(
+            UpdateLayoutAddress)(graphics);
+    }
+
+    static uintptr_t GetScreen0PreservableCamera(
+        uint8_t* graphics, uint32_t originalMode)
+    {
+        if (!graphics || IsBadReadPtr(
+                graphics + Screen0CameraOffset, sizeof(uintptr_t)))
+        {
+            return 0;
+        }
+
+        const auto camera = *reinterpret_cast<uintptr_t*>(
+            graphics + Screen0CameraOffset);
+        if (!camera || IsBadReadPtr(
+                reinterpret_cast<void*>(camera), sizeof(uintptr_t)))
+        {
+            return 0;
+        }
+
+        const auto cameraVtable = *reinterpret_cast<uintptr_t*>(camera);
+        const bool eventCamera = cameraVtable == EventMotionCameraVtable;
+        // Mode 0 is the game's short single-view transition. Unlike the long
+        // scripted cutscene path, it reuses the normal camera belonging to the
+        // character selected by the event (Claire or Moira). Preserve that
+        // native choice rather than rebuilding screen 0 from camera mapping 0.
+        const bool selectedGameplayCamera = originalMode == 0 &&
+            cameraVtable == NormalCameraVtable;
+        return eventCamera || selectedGameplayCamera ? camera : 0;
+    }
+
+    static bool ApplyNativeLeftLayout()
+    {
+        auto controller = GetSplitController();
+        auto renderer = GetRenderer();
+        auto graphics = GetGraphics();
+        if (!controller || !renderer || !graphics ||
+            *reinterpret_cast<uint32_t*>(controller + SplitModeOffset) == 1)
+        {
+            return false;
+        }
+
+        auto& mode = *reinterpret_cast<uint32_t*>(controller + SplitModeOffset);
+        auto& rendererWidth =
+            *reinterpret_cast<uint32_t*>(renderer + RendererWidthOffset);
+        auto& rendererHeight =
+            *reinterpret_cast<uint32_t*>(renderer + RendererHeightOffset);
+        const auto originalMode = mode;
+        const auto originalRendererWidth = rendererWidth;
+        const auto originalRendererHeight = rendererHeight;
+        const auto preservedCamera =
+            GetScreen0PreservableCamera(graphics, originalMode);
+
+        // Mode 2 is the game's native single-view constructor. Expose W/2 x H
+        // only for this synchronous rebuild, then immediately restore the
+        // physical renderer dimensions and the manager's real mode.
+        mode = 2;
+        rendererWidth = gState.width / 2;
+        rendererHeight = gState.height;
+        RebuildCurrentNativeLayout();
+
+        // Preserve the camera already selected by the game across only our
+        // synchronous W/2 rebuild. Long scripted scenes install an exact
+        // uEventMotionCamera; short mode-0 scenes install the exact normal
+        // camera of the interacting character. Without the second case a
+        // Moira event is silently rebound to camera mapping 0 (Claire).
+        if (preservedCamera && !IsBadReadPtr(
+                reinterpret_cast<void*>(preservedCamera), sizeof(uintptr_t)))
+        {
+            const auto preservedVtable =
+                *reinterpret_cast<uintptr_t*>(preservedCamera);
+            const bool stillValid =
+                preservedVtable == EventMotionCameraVtable ||
+                (originalMode == 0 && preservedVtable == NormalCameraVtable);
+            if (stillValid)
+            {
+                *reinterpret_cast<uintptr_t*>(
+                    graphics + Screen0CameraOffset) = preservedCamera;
+            }
+        }
+
+        ApplyHalfLogicalState();
+        rendererWidth = originalRendererWidth;
+        rendererHeight = originalRendererHeight;
+        mode = originalMode;
+
+        // updateLayout cached temporary mode 2. Acknowledge the real mode so
+        // the game's next per-frame update does not undo the native W/2 rect.
+        *reinterpret_cast<uint32_t*>(graphics + CachedModeOffset) = originalMode;
+        return true;
+    }
+
+    static void RestorePhysicalLayout()
+    {
+        auto graphics = GetGraphics();
+        if (!graphics || !gState.width || !gState.height)
+            return;
+
+        RestoreFullLogicalCaches();
+        WriteRect(graphics + Screen1FallbackRectOffset,
+            0, 0, static_cast<LONG>(gState.width),
+            static_cast<LONG>(gState.height));
+        RebuildCurrentNativeLayout();
+        gState.layoutInitialized = false;
+        gState.initialLayoutPending = true;
+        gState.previousSplit = false;
+    }
+
+    static void InitializeLayoutState()
+    {
+        if (!gState.width || !gState.height || !GetGraphics() || !GetRenderer())
+            return;
+
+        RestoreFullLogicalCaches();
+        gState.layoutInitialized = true;
+        gState.initialLayoutPending = true;
+        // Treat an already active split as a transition so native screen 0/1
+        // ownership is rebuilt once after startup or a device reset.
+        gState.previousSplit = false;
+    }
+
+    static void MirrorLeftToBoth()
+    {
+        if (!gState.backbuffer || !EnsureIntermediate())
+            return;
+
+        const RECT source = {
+            0, 0, static_cast<LONG>(gState.width / 2),
+            static_cast<LONG>(gState.height)
+        };
+        const RECT left = source;
+        const RECT right = {
+            static_cast<LONG>(gState.width / 2), 0,
+            static_cast<LONG>(gState.width), static_cast<LONG>(gState.height)
+        };
+
+        HRESULT result = gState.device->StretchRect(
+            gState.backbuffer, &source, gState.intermediate, nullptr, D3DTEXF_NONE);
+        if (SUCCEEDED(result))
+            result = gState.device->StretchRect(
+                gState.intermediate, nullptr, gState.backbuffer, &left, D3DTEXF_NONE);
+        if (SUCCEEDED(result))
+            result = gState.device->StretchRect(
+                gState.intermediate, nullptr, gState.backbuffer, &right, D3DTEXF_NONE);
+
+        if (FAILED(result))
+        {
+            // Retry lazily with fresh surfaces. No per-frame GetBackBuffer is
+            // needed during normal rendering.
+            ReleaseSurfaces();
+            gState.layoutInitialized = false;
+        }
+    }
+
+    static void HandlePresent()
+    {
+        InterlockedIncrement(&gDualMonitorPresentSerial);
+
+        if (!bDualMonitorMode)
+        {
+            if (gState.dualWasEnabled && gState.layoutInitialized)
+                RestorePhysicalLayout();
+            gState.dualWasEnabled = false;
+            return;
+        }
+        gState.dualWasEnabled = true;
+
+        const bool splitBeforeRefresh = IsSplitScreenActive();
+        const bool enteringNonSplit = gState.previousSplit && !splitBeforeRefresh;
+        bool validateBackbuffer = !gState.backbuffer || enteringNonSplit;
+        if (!splitBeforeRefresh && !validateBackbuffer)
+        {
+            if (gState.validationCountdown == 0)
+                validateBackbuffer = true;
+            else
+                --gState.validationCountdown;
+        }
+        if (validateBackbuffer && !RefreshBackbuffer(true))
+            return;
+
+        if (!gState.layoutInitialized)
+            InitializeLayoutState();
+        if (!gState.layoutInitialized)
+            return;
+
+        const bool split = IsSplitScreenActive();
+        const bool enteredSplit = !gState.previousSplit && split;
+        if (gState.previousSplit && !split)
+            gState.initialLayoutPending = true;
+        gState.previousSplit = split;
+
+        auto graphics = GetGraphics();
+        if (!graphics)
+            return;
+
+        if (split)
+        {
+            // Logical caches may be restored every frame. Screen slots remain
+            // exclusively owned by the native co-op layout after this edge.
+            RestoreFullLogicalCaches();
+            if (enteredSplit)
+            {
+                WriteRect(graphics + Screen1FallbackRectOffset,
+                    0, 0, static_cast<LONG>(gState.width),
+                    static_cast<LONG>(gState.height));
+                RebuildCurrentNativeLayout();
+            }
+            return;
+        }
+
+        ApplyHalfLogicalState();
+        if (gState.initialLayoutPending)
+        {
+            gState.initialLayoutPending = false;
+            ApplyNativeLeftLayout();
+            return;
+        }
+
+        if (!IsRect(graphics + Screen0RectOffset, 0, 0,
+                static_cast<LONG>(gState.width / 2),
+                static_cast<LONG>(gState.height)))
+        {
+            ApplyNativeLeftLayout();
+            return;
+        }
+
+        MirrorLeftToBoth();
+    }
+
+    static HRESULT __stdcall ResetHook(IDirect3DDevice9* device,
+        D3DPRESENT_PARAMETERS* parameters)
+    {
+        if (device == gState.device)
+        {
+            // Both retained surfaces are invalid across Reset; reacquire them
+            // lazily from the new swap chain on the next Present.
+            ReleaseSurfaces();
+            gState.layoutInitialized = false;
+            gState.initialLayoutPending = true;
+            gState.previousSplit = false;
+        }
+        return gDualMonitorResetHook.unsafe_stdcall<HRESULT>(device, parameters);
+    }
+
+    static HRESULT __stdcall PresentHook(IDirect3DDevice9* device,
+        const RECT* sourceRect, const RECT* destinationRect,
+        HWND destinationWindow, const RGNDATA* dirtyRegion)
+    {
+        if (device == gState.device)
+            HandlePresent();
+        return gDualMonitorPresentHook.unsafe_stdcall<HRESULT>(
+            device, sourceRect, destinationRect, destinationWindow, dirtyRegion);
+    }
+
+    static void __stdcall SingleScreenRectConverter(void* owner, int32_t* rect)
+    {
+        auto graphics = GetGraphics();
+        const bool target = bDualMonitorMode && gState.layoutInitialized &&
+            !IsSplitScreenActive() && graphics && rect &&
+            rect[0] == 0 && rect[1] == 0 && rect[2] == 1280 && rect[3] == 720;
+        RECT originalActiveRect = {};
+        if (target)
+        {
+            originalActiveRect = ReadRect(graphics + ActiveRectOffset);
+            WriteRect(graphics + ActiveRectOffset, 0, 0,
+                static_cast<LONG>(gState.width / 2),
+                static_cast<LONG>(gState.height));
+        }
+
+        reinterpret_cast<void(__stdcall*)(void*, int32_t*)>(
+            NativeRectConverterAddress)(owner, rect);
+
+        if (target)
+            *reinterpret_cast<RECT*>(graphics + ActiveRectOffset) = originalActiveRect;
+    }
+
+    static InstallAttempt TryInstall()
+    {
+        auto renderer = GetRenderer();
+        if (!renderer)
+            return InstallAttempt::NotReady;
+        gState.device = *reinterpret_cast<IDirect3DDevice9**>(renderer + 0x98);
+        if (!gState.device)
+            return InstallAttempt::NotReady;
+
+        const auto callTarget = NativeRectConverterCall + 5 +
+            *reinterpret_cast<int32_t*>(NativeRectConverterCall + 1);
+        if (*reinterpret_cast<uint8_t*>(NativeRectConverterCall) != 0xE8 ||
+            callTarget != NativeRectConverterAddress)
+        {
+            return InstallAttempt::PermanentFailure;
+        }
+
+        auto** vtable = *reinterpret_cast<void***>(gState.device);
+        if (!vtable)
+            return InstallAttempt::NotReady;
+        gDualMonitorResetHook = safetyhook::create_inline(vtable[16], ResetHook);
+        gDualMonitorPresentHook = safetyhook::create_inline(vtable[17], PresentHook);
+        if (!gDualMonitorResetHook || !gDualMonitorPresentHook)
+        {
+            gDualMonitorPresentHook = {};
+            gDualMonitorResetHook = {};
+            return InstallAttempt::PermanentFailure;
+        }
+
+        injector::MakeCALL(NativeRectConverterCall,
+            SingleScreenRectConverter, true);
+        return InstallAttempt::Installed;
+    }
+
+    static void RequestInstall()
+    {
+        InterlockedExchange(&gInstallRequested, 1);
+    }
+
+    void PollInstall()
+    {
+        if (!bDualMonitorMode ||
+            !InterlockedCompareExchange(&gInstallRequested, 0, 0) ||
+            InterlockedCompareExchange(&gInstallFinished, 0, 0))
+        {
+            return;
+        }
+
+        const auto now = GetTickCount64();
+        if (now < gNextInstallAttempt ||
+            InterlockedCompareExchange(&gInstallBusy, 1, 0) != 0)
+        {
+            return;
+        }
+        gNextInstallAttempt = now + 100;
+
+        const auto result = TryInstall();
+        if (result == InstallAttempt::Installed)
+        {
+            InterlockedExchange(&gInstallFinished, 1);
+            rev2coop::Report(
+                "[DUAL] Native W/2 single-view layout, FMV and final-frame mirroring enabled");
+        }
+        else if (result == InstallAttempt::PermanentFailure)
+        {
+            InterlockedExchange(&gInstallFinished, -1);
+            rev2coop::Report(
+                "[DUAL] Non-split renderer skipped: native/D3D hook guard failed");
+        }
+
+        InterlockedExchange(&gInstallBusy, 0);
+    }
 }
 
 bool bDisableCreateQuery = false;
@@ -1674,15 +2466,63 @@ void Init()
                     return;
 
                 g_device->SetVertexShader(g_myScreenVertexShader);
-                const float horzScaleFactor = (defaultAspectRatio / GetAspectRatio());
+                float horzScaleFactor = defaultAspectRatio / GetAspectRatio();
+                float horizontalOffset = 0.0f;
+                if (bDualMonitorMode && !IsSplitScreenActive())
+                {
+                    uint32_t physicalWidth = 0;
+                    uint32_t physicalHeight = 0;
+                    const bool hasPhysicalCanvas = GetPhysicalRendererSize(
+                        physicalWidth, physicalHeight);
+                    const bool isCommonMenuWmv = IsPauseCommonMenu(
+                        GetActivePauseCommonMenu());
+
+                    if (isCommonMenuWmv)
+                    {
+                        // The animated main-menu background is WMV too, but
+                        // it is already rendered into the native W/2 target.
+                        // A real FMV can report that same half-width D3D
+                        // viewport, so the live CommonMenu controller is the
+                        // discriminator; viewport dimensions are not.
+                        if (hasPhysicalCanvas)
+                        {
+                            const float localAspect =
+                                (static_cast<float>(physicalWidth) * 0.5f) /
+                                static_cast<float>(physicalHeight);
+                            horzScaleFactor = defaultAspectRatio / localAspect;
+                        }
+                        horizontalOffset = 0.0f;
+                    }
+                    else
+                    {
+                        // A real full-canvas FMV maps from NDC [-1,+1] into
+                        // the left equal-monitor viewport [-1,0]. Present then
+                        // mirrors that completed viewport to the right.
+                        constexpr float leftFraction = 1.0f / 2.0f;
+                        horzScaleFactor = leftFraction;
+                        horizontalOffset = -(1.0f - leftFraction);
+                        InterlockedExchange(&gDualMonitorLastFmvPresentSerial,
+                            InterlockedCompareExchange(
+                                &gDualMonitorPresentSerial, 0, 0));
+                    }
+                }
                 const std::array<float, 4> shaderConsts = { horzScaleFactor, 0.0f, 0.0f, 0.0f };
                 g_device->SetVertexShaderConstantF(20, shaderConsts.data(), 1);
+                const std::array<float, 4> offsetConsts = { horizontalOffset, 0.0f, 0.0f, 0.0f };
+                g_device->SetVertexShaderConstantF(21, offsetConsts.data(), 1);
             });
     }
 
     // split screen windows dimensions
     injector::MakeCALL(0x4AE6E8, SplitScreenSetupTop, true);
     injector::MakeCALL(0x4AE732, SplitScreenSetupBottom, true);
+
+    if (bDualMonitorMode)
+    {
+        dualmonitor::RequestInstall();
+        rev2coop::Report(
+            "[DUAL] Waiting for the renderer/device before installing non-split hooks");
+    }
 
     // GUI
     injector::MakeJMP(0xE18040, sub_E18040_rescale, true);
@@ -1697,9 +2537,14 @@ void Init()
     // A later F5 reload may disable replay safely, but enabling it requires a
     // restart so the guarded vtable wrappers can be installed.
     if (bDualMonitorMode)
+    {
         rev2coop::Report(InstallDualMonitorPauseGui()
             ? "[DUAL] Pause menu, purpose and guide duplicated for the right monitor"
             : "[DUAL] Pause duplication skipped: native GUI draw-slot guard failed");
+        rev2coop::Report(InstallDualMonitorFileText()
+            ? "[DUAL] Active story FileText notes duplicated for the right monitor"
+            : "[DUAL] FileText duplication skipped: native GUI draw-slot guard failed");
+    }
 
     if (bDisableDamageOverlay)
     {
@@ -1713,9 +2558,14 @@ void Init()
     }
 
     if (iniReader.ReadInteger("COOP", "ViewportHud", 1) != 0)
+    {
         rev2coop::Report(rev2coop::InstallHud()
             ? "[COOP] SP layout/height-uniform geometry enabled for Equip/Heal/HealNum/Flash/ReticleBase"
             : "[COOP] HUD skipped: native code/vtable guard failed or allocation unavailable");
+        rev2coop::Report(InstallFixedHudActionPrompt()
+            ? "[COOP] Fixed ActionIcon2 HUD prompt uses SP-local layout and split-safe draw"
+            : "[COOP] Fixed ActionIcon2 HUD prompt skipped: native code/vtable guard failed");
+    }
     if (iniReader.ReadInteger("COOP", "NativeKeyboardMousePlayer1", 1) != 0)
         rev2coop::Report(rev2coop::InstallInput()
             ? "[COOP] Native P1 keyboard/mouse isolation and bridge capture coordination enabled"

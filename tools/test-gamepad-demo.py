@@ -53,11 +53,25 @@ class BridgeTests(unittest.TestCase):
         b.demo_duration, b.demo_started, b.demo_game_pid = 0, 0, 0
         b.demo_pad = 1
         b.capture_enabled = True
+        b.disconnect_until = 0.0
+        b.pad_attached = [True, True]
+        b.config = types.SimpleNamespace(disconnect_seconds=2.0)
         b.pressed, b.mouse_buttons, b.mouse_dpad_until = {1}, {"left"}, {}
         b.mouse_delta = [10, 10]
         b._notify = Mock()
         b._foreground_coop_pid = lambda: 35776
         return b
+
+    def test_disconnect_pulse_preserves_capture_and_clears_reports(self):
+        b = self.bridge()
+        b.demo_duration = math.inf
+        b._begin_disconnect_pulse(now=100.0)
+        self.assertEqual(b.disconnect_until, 102.0)
+        self.assertTrue(b.capture_enabled)
+        self.assertEqual(b.demo_duration, 0.0)
+        self.assertEqual(b.pressed, set())
+        self.assertEqual(b.mouse_buttons, set())
+        b._notify.assert_any_call("Both virtual controllers unplugged for 2s.", -1)
 
     def test_f2_cycles_pad1_pad2_off_and_repeats_with_native_keyboard_free(self):
         b = self.bridge()
@@ -90,6 +104,8 @@ class BridgeTests(unittest.TestCase):
         b = self.bridge()
         b.stop_event = threading.Event()
         b.config = types.SimpleNamespace(poll_hz=120, mouse_enabled=False)
+        b.disconnect_until = 0.0
+        b.pad_attached = [True, True]
         b.active_player = 0
         b.capture_enabled = capture
         b.demo_started = time.perf_counter() - (121 if expired else .5)

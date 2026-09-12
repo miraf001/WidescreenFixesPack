@@ -192,25 +192,87 @@ inline bool InstallInput()
         !Matches(0x988610, Hex("a1 00 ae 57 01 83 b8 f0 08 00 00 01")) ||
         !Matches(0x988622, Hex("57 8b 3d 18 e9 5d 01 33 d2 eb 03")) ||
         !Matches(0x988680, Hex("c7 86 bc c4 15 00 01 00 00 00 89 86 c0 c4 15 00")) ||
-        !Matches(0x9886A7, Hex("c7 86 bc c4 15 00 00 00 00 00 c7 86 c0 c4 15 00 00 00 00 00")) ||
-        !Matches(0xA15521, Hex("83 be 20 79 00 00 00")) ||
-        !Matches(0x6E6DC0, Hex("8b44240483f8ff7f0533c0c2040083f8087df68b448120c20400")) ||
-        !Matches(0x886DD0, Hex("8b44240483f801770a8b8481f8080000c20400"))) return false;
+         !Matches(0x9886A7, Hex("c7 86 bc c4 15 00 00 00 00 00 c7 86 c0 c4 15 00 00 00 00 00")) ||
+         !Matches(0xA15521, Hex("83 be 20 79 00 00 00")) ||
+         !Matches(0x6E6DC0, Hex("8b44240483f8ff7f0533c0c2040083f8087df68b448120c20400")) ||
+         !Matches(0x886DD0, Hex("8b44240483f801770a8b8481f8080000c20400")) ||
+         !Matches(InteractionCandidateSite, InteractionCandidateOriginal()) ||
+         !Matches(InteractionCandidateAltSite, InteractionCandidateAltOriginal()) ||
+         !Matches(TutorialParserEntry, TutorialParserFrameOriginal())) return false;
     for (const auto& g : InputGates) if (!Matches(g.site, Original(g))) return false;
+    for (const auto& g : PromptInputGates)
+        if (!Matches(g.site, PromptInputOriginal())) return false;
+    for (const auto site : TutorialPromptSites)
+        if (!Matches(site, PromptInputOriginal())) return false;
+
     const auto allocation = Allocate(0x3000);
     if (!allocation) return false;
+    const auto promptAllocation = Allocate(0x1000);
+    if (!promptAllocation)
+    {
+        VirtualFree(reinterpret_cast<void*>(allocation), 0, MEM_RELEASE);
+        return false;
+    }
     for (size_t i = 0; i < InputGates.size(); ++i)
     {
         const auto code = InputCode(allocation + uint32_t(i * 256), allocation + 0x2000 + uint32_t(i * 12), InputGates[i]);
         std::memcpy(reinterpret_cast<void*>(allocation + i * 256), code.data(), code.size());
     }
-    const auto captureAddress = allocation + 0x1C00;
+    // Keep the capture thunk in the first free 0x100-byte slot. This used to
+    // be the fixed 0x1C00 slot for 28 gates; the interactable-object gate is
+    // now the 29th and occupies that address itself.
+    const auto captureAddress = allocation +
+        static_cast<uint32_t>(InputGates.size() * 0x100);
     const auto captureCode = CaptureCode(captureAddress, reinterpret_cast<uint32_t>(&BridgeCaptured));
     std::memcpy(reinterpret_cast<void*>(captureAddress), captureCode.data(), captureCode.size());
-    if (!Seal(allocation, 0x2000)) { VirtualFree(reinterpret_cast<void*>(allocation), 0, MEM_RELEASE); return false; }
+    const auto candidateAddress = captureAddress + 0x100;
+    const auto candidateCode = InteractionCandidateCode(candidateAddress);
+    std::memcpy(reinterpret_cast<void*>(candidateAddress), candidateCode.data(), candidateCode.size());
+    const auto candidateAltAddress = candidateAddress + 0x100;
+    const auto candidateAltCode = InteractionCandidateAltCode(candidateAltAddress);
+    std::memcpy(reinterpret_cast<void*>(candidateAltAddress),
+        candidateAltCode.data(), candidateAltCode.size());
+    static_assert((InputGates.size() + 3) * 0x100 <= 0x2000,
+        "input thunks overlap the counter page");
+
+    for (size_t i = 0; i < PromptInputGates.size(); ++i)
+    {
+        const auto address = promptAllocation + static_cast<uint32_t>(i * 0x100);
+        const auto code = PromptInputCode(address, PromptInputGates[i]);
+        std::memcpy(reinterpret_cast<void*>(address), code.data(), code.size());
+    }
+    const auto tutorialBase = promptAllocation +
+        static_cast<uint32_t>(PromptInputGates.size() * 0x100);
+    for (size_t i = 0; i < TutorialPromptSites.size(); ++i)
+    {
+        const auto address = tutorialBase + static_cast<uint32_t>(i * 0x100);
+        const auto code = TutorialPromptCode(address, TutorialPromptSites[i]);
+        std::memcpy(reinterpret_cast<void*>(address), code.data(), code.size());
+    }
+    static_assert((PromptInputGates.size() + TutorialPromptSites.size()) *
+        0x100 <= 0x1000, "prompt thunks exceed their allocation");
+
+    if (!Seal(allocation, 0x2000) || !Seal(promptAllocation, 0x1000))
+    {
+        VirtualFree(reinterpret_cast<void*>(promptAllocation), 0, MEM_RELEASE);
+        VirtualFree(reinterpret_cast<void*>(allocation), 0, MEM_RELEASE);
+        return false;
+    }
     for (size_t i = 0; i < InputGates.size(); ++i)
         Put(InputGates[i].site, Redirect(InputGates[i].site, allocation + uint32_t(i * 256), 7));
     // Enable native auto only AFTER every ownership gate has been installed.
+    Put(InteractionCandidateSite,
+        Redirect(InteractionCandidateSite, candidateAddress, InteractionCandidateOriginal().size()));
+    Put(InteractionCandidateAltSite, Redirect(InteractionCandidateAltSite,
+        candidateAltAddress, InteractionCandidateAltOriginal().size()));
+    for (size_t i = 0; i < PromptInputGates.size(); ++i)
+        Put(PromptInputGates[i].site, Redirect(PromptInputGates[i].site,
+            promptAllocation + static_cast<uint32_t>(i * 0x100),
+            PromptInputOriginal().size()));
+    for (size_t i = 0; i < TutorialPromptSites.size(); ++i)
+        Put(TutorialPromptSites[i], Redirect(TutorialPromptSites[i],
+            tutorialBase + static_cast<uint32_t>(i * 0x100),
+            PromptInputOriginal().size()));
     Put(InputSite, Redirect(InputSite, captureAddress, 6));
     InputInstalled = true;
     return true;

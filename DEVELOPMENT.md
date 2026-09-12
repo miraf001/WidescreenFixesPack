@@ -202,11 +202,13 @@ game:
 
 It creates two persistent virtual Xbox 360 controllers through the already
 installed ViGEmBus driver. The same keyboard controls only the active controller.
-`F8` switches between P1 and P2, `F9` temporarily releases or recaptures the
-mapped keyboard keys, and `F10` exits and disconnects both controllers. An audible
-single or double beep identifies the selected player. `Enter` is the active
-controller's Start button, so select P2 with `F8` and press `Enter` to join the
-second player.
+`F7` physically unplugs both virtual pads for `BRIDGE.DisconnectSeconds` (2 seconds
+by default) and then reconnects them automatically. This is useful for exercising
+the co-op -> single-view -> co-op transition without stopping the bridge. `F8`
+switches between P1 and P2, `F9` temporarily releases or recaptures the mapped
+keyboard keys, and `F10` exits and disconnects both controllers. An audible single
+or double beep identifies the selected player. `Enter` is the active controller's
+Start button, so select P2 with `F8` and press `Enter` to join the second player.
 
 The game assigns whichever controller sent Start to player 2. Consequently,
 bridge device numbers are not fixed game-player numbers: either bridge device
@@ -252,7 +254,10 @@ previous pad. Keyboard/mouse remain released in all three states, and starting
 requires foreground RE:Rev2 co-op. No controller disconnects are involved.
 Do not assume bridge controller 2 means the second game actor.
 F8/F9 also cancel the demo before changing keyboard routing. CLI commands
-`status`, `release`, and `quit` address only the bridge, never the game UI.
+`status`, `release`, and `quit` address only the bridge, never the game UI. The
+F7 pulse preserves the current F9 capture/release selection, clears held reports
+before unplugging, and performs ViGEm remove/add operations only on the bridge
+updater thread so they cannot race controller report updates.
 Use `gamepad-bridge.ps1 -StartReleased` to leave native input free at startup.
 Updating an already running old bridge requires one bridge restart and rejoining
 co-op; the game itself and its live patches need not be restarted. Offline demo
@@ -329,7 +334,7 @@ Restart-only `[COOP]` options, enabled by default:
   height uniformly. Only these classes bypass the old HUD X scale/Y offset.
   Native controller/node-table identity replaces session-specific addresses;
   native updates restore selector 5 in SP and maintain selector 2 in co-op.
-- `NativeKeyboardMousePlayer1=1`: the exact 28 tested actor-ownership predicates
+- `NativeKeyboardMousePlayer1=1`: the exact 29 tested actor-ownership predicates
   plus native auto-device selection. No global actor state/device assignments
   are overwritten. The pad pressing Start remains assigned to player 2.
   The ASI's background tuning thread reads the existing bridge status IPC;
@@ -343,7 +348,7 @@ continues to affect the legacy GUI paths, not these five classes. Subtitles,
 menus, bullet marks and effect-filter settings remain unchanged.
 
 `tools/test-rerev2-coop-permanent.ps1` compiles the actual C++ code generator,
-checks all 28 input thunks against the accepted live bytes, executes their CPU
+checks all 29 input thunks against the accepted live bytes, executes their CPU
 tests, and tests dynamic HUD ownership, rebuilt nodes, viewport aspect ratios,
 register/flag preservation, native fallbacks and capture branches. It never
 opens the game or creates a virtual controller. These tests and a successful
@@ -355,3 +360,39 @@ Current live state files all use suffix `20260831-03.json`: `sp-hud-live`,
 capture relay PID 53160. Restore order remains relay before input, and reticle
 before Flash before HUD. Recheck process identity before any subsequent work.
 Checkpoint: `recovery/checkpoints/2026-08-31-before-permanent-hud-input/`.
+
+### Dual-monitor non-split renderer candidate (2026-09-08)
+
+`DualMonitorMode=1` now installs a guarded D3D9/native-layout state machine.
+Outside real split screen, it asks the game's own single-view layout builder to
+construct a `W/2 x H` left viewport, restores the physical renderer dimensions
+immediately afterwards, and copies the completed left backbuffer half to the
+right immediately before `Present`. On entry to real split screen it restores
+the full logical canvas, rebuilds the native two-player layout once, stops the
+final-frame copy, and thereafter leaves both native screen slots alone.
+
+Retained default-pool surfaces are released before `Reset`. The backbuffer is
+revalidated after reset, on split/non-split transitions, after a failed copy,
+and periodically every 300 non-split presents. This avoids both stale-surface
+blinking and the per-frame `GetBackBuffer` overhead used during live diagnosis.
+FMVs use the existing exact WMV draw hook to map the quad into the left half;
+only TextVoice draws adjacent to a detected FMV frame receive the matching
+horizontal scale. Ordinary SP and in-engine TextVoice already use the W/2-local
+canvas and must not receive a second 0.5 scale.
+
+In true split screen, `uGUIActionIcon2` alone selects its SP-local layout and
+bypasses the legacy generic co-op rescale. The world-attached `uGUIActionIcon`
+is unchanged. Dual pause replay covers `uGUICommonMenu`, `uGUIPurpose` and
+`uGUIGuide`. Their cached bounds may be either canonical or exactly one
+viewport translated after a replay; both are accepted, and the original cache
+is restored immediately after the right-hand pass to prevent alternating-frame
+flicker. Active story `uGUIFileText` notes are also replayed once at a dynamic
+`physicalWidth / 2` offset during true split screen. The exact class, active
+state and dual/split guards keep cached notes and single-monitor/SP paths native;
+the source X coordinate is restored synchronously after the right-hand draw.
+
+Release verification remains an in-game task. At minimum test main menu/SP
+mirroring, an FMV with subtitles, an in-engine single-view cutscene, transition
+into and out of co-op, the independent P2 viewport, fixed HUD action prompt,
+and a non-blinking duplicated pause menu. The game INI must use
+`DualMonitorMode=1`; the packaged default remains safely disabled.

@@ -31,6 +31,16 @@ developed and tested against the current Steam executable.
 - Story subtitles calibrated to their single-player scale and height: shared
   in side-by-side mode, or duplicated at the centres of two monitors when
   `DualMonitorMode` is enabled.
+- Two-monitor presentation mode for equal-width displays: menus, single-player
+  gameplay, FMVs and single-view cutscenes render natively into the left half
+  and the completed frame is mirrored to the right. Native player 1/player 2
+  rendering resumes automatically whenever real split screen is active.
+- Dual-monitor pause menu, current objective and contextual help duplicated
+  into the second player viewport without modifying the single-monitor path.
+- Open story notes duplicated into the second player viewport in dual-monitor
+  split screen, with their offset derived from half the live canvas width.
+- Mixed input keeps contextual interactions actor-local: player 1 keyboard and
+  mouse no longer trigger an action for the gamepad-only second player.
 
 All co-op transforms read the live viewport dimensions. They are not fixed
 offsets for one resolution and are designed to work at 16:9 and wider desktop
@@ -58,15 +68,22 @@ KeyboardPartnerCommand = 1
 DualMonitorMode = 0
 ```
 
-`DualMonitorMode = 0` is the single-monitor side-by-side default: one shared
-story subtitle is centered on the combined screen. Set it to `1` only when the
-game spans two equal-resolution monitors; the subtitle is then rendered once in
-the centre of each monitor. Its position and scale are derived from the live
-combined resolution in both modes.
+`DualMonitorMode = 0` preserves the normal single-monitor paths, including one
+shared subtitle and one native pause interface. Set it to `1` only when the game
+spans two equal-resolution monitors. Outside real split screen, the game uses a
+native half-width left viewport with the correct aspect ratio and mirrors that
+finished image to the right monitor. During real split screen the mirror is
+disabled and the existing player 1/player 2 viewports remain independent; story
+subtitles and the pause interface are duplicated where both players need them.
+Open story notes are likewise duplicated only during real split screen.
+FMV placement, subtitle scaling and all positions are derived from the live
+combined resolution rather than fixed 1920/3840 coordinates. A restart is
+required after changing this option.
 
 The optional keyboard-to-gamepad bridge is documented in
-[DEVELOPMENT.md](DEVELOPMENT.md). Its hotkeys include F8 to select the virtual
-pad, F9 to release/capture input and Backspace for the emulated Back button.
+[DEVELOPMENT.md](DEVELOPMENT.md). Its hotkeys include F7 to briefly unplug and
+reconnect both virtual pads, F8 to select the virtual pad, F9 to release/capture
+input and Backspace for the emulated Back button.
 
 ## Build and test
 

@@ -191,6 +191,9 @@ class BridgeConfig:
         self.demo_pad = parser.getint("BRIDGE", "DemoPad", fallback=2) - 1
         if self.demo_pad not in (0, 1):
             raise RuntimeError("BRIDGE.DemoPad must be 1 or 2 (bridge device, not game actor).")
+        self.disconnect_seconds = parser.getfloat("BRIDGE", "DisconnectSeconds", fallback=2.0)
+        if not 0.25 <= self.disconnect_seconds <= 10.0:
+            raise RuntimeError("BRIDGE.DisconnectSeconds must be between 0.25 and 10 seconds.")
 
         self.suppress_mapped_keys = (
             parser.getboolean("BRIDGE", "SuppressMappedKeys") and not force_no_suppress
@@ -198,6 +201,7 @@ class BridgeConfig:
         self.hotkeys = {
             "switch": self._read_key(parser, "HOTKEYS", "SwitchPlayer"),
             "capture": self._read_key(parser, "HOTKEYS", "ToggleCapture"),
+            "disconnect": self._read_key(parser, "HOTKEYS", "PulseDisconnect"),
             "quit": self._read_key(parser, "HOTKEYS", "Quit"),
             "demo": KEY_CODES[parser.get("HOTKEYS", "ToggleDemo", fallback=
                                parser.get("HOTKEYS", "StopDemo", fallback="F2")).upper()],
@@ -308,9 +312,11 @@ class KeyboardGamepadBridge:
         self.demo_duration = 0.0
         self.demo_game_pid = 0
         self.demo_pad = config.demo_pad
+        self.disconnect_until = 0.0
         self.stop_event = threading.Event()
         self.notifications: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
         self.pads: list[vg.VX360Gamepad] = []
+        self.pad_attached: list[bool] = []
         self.keyboard_hook = None
         self.mouse_hook = None
         self.raw_input_window = None
@@ -396,14 +402,10 @@ class KeyboardGamepadBridge:
 
     def run(self) -> int:
         self.pads = [vg.VX360Gamepad(), vg.VX360Gamepad()]
+        self.pad_attached = [True for _ in self.pads]
         self._neutralize_all()
         # Creation order and XInput slot order need not match after reconnect.
-        from vgamepad.win import vigem_client, vigem_commons
-        for index, pad in enumerate(self.pads):
-            user_index = wintypes.DWORD(0xFFFFFFFF)
-            error = vigem_client.vigem_target_x360_get_user_index(pad._busp, pad._devicep, ctypes.byref(user_index))
-            if error == vigem_commons.VIGEM_ERRORS.VIGEM_ERROR_NONE:
-                print(f"Bridge pad {index + 1}: XInput slot {user_index.value}", flush=True)
+        self._report_pad_slots()
 
         notifier = threading.Thread(target=self._notification_loop, name="bridge-notifier", daemon=True)
         updater = threading.Thread(target=self._update_loop, name="bridge-updater", daemon=True)
@@ -435,7 +437,11 @@ class KeyboardGamepadBridge:
                 f"keyboard suppression: {keyboard_suppression}; {mouse_mode}.",
                 self.active_player + 1,
             )
-            self._notify("F2: demo pad1 -> pad2 -> off | F8: switch P1/P2 | F9: release/capture inputs | F10: quit", 0)
+            self._notify(
+                "F2: demo pad1 -> pad2 -> off | F7: briefly unplug both pads | "
+                "F8: switch P1/P2 | F9: release/capture inputs | F10: quit",
+                0,
+            )
 
             message = wintypes.MSG()
             while not self.stop_event.is_set():
@@ -494,6 +500,8 @@ class KeyboardGamepadBridge:
                     self._clear_input_state()
                     state = "captured" if self.capture_enabled else "released"
                     self._notify(f"Keyboard and mouse {state}.", 1 if self.capture_enabled else -1)
+                elif first_press and hotkey_action == "disconnect":
+                    self._begin_disconnect_pulse()
                 elif first_press and hotkey_action == "quit":
                     self._clear_input_state()
                     self.stop_event.set()
@@ -710,6 +718,78 @@ class KeyboardGamepadBridge:
             self.demo_duration = 0.0
             self._notify("P2 demo stopped; pads remain connected.", 0)
 
+    def _begin_disconnect_pulse(self, now: float | None = None) -> None:
+        """Request a brief physical ViGEm unplug/replug cycle for both pads.
+
+        Caller holds self.lock. The updater thread owns all ViGEm add/remove
+        calls so it can never race a report update from another thread.
+        """
+        self._stop_demo()
+        self._clear_input_state()
+        started = time.perf_counter() if now is None else now
+        self.disconnect_until = started + self.config.disconnect_seconds
+        self._notify(
+            f"Both virtual controllers unplugged for {self.config.disconnect_seconds:g}s.",
+            -1,
+        )
+
+    @staticmethod
+    def _vigem_error_name(error: int, vigem_commons) -> str:
+        try:
+            return vigem_commons.VIGEM_ERRORS(error).name
+        except ValueError:
+            return f"0x{error:08X}"
+
+    def _disconnect_pads(self) -> None:
+        from vgamepad.win import vigem_client, vigem_commons
+
+        self._neutralize_all()
+        accepted = {
+            vigem_commons.VIGEM_ERRORS.VIGEM_ERROR_NONE,
+            vigem_commons.VIGEM_ERRORS.VIGEM_ERROR_TARGET_NOT_PLUGGED_IN,
+        }
+        for index, pad in enumerate(self.pads):
+            if not self.pad_attached[index]:
+                continue
+            error = vigem_client.vigem_target_remove(pad._busp, pad._devicep)
+            if error not in accepted:
+                raise RuntimeError(
+                    f"Unable to unplug bridge pad {index + 1}: "
+                    f"{self._vigem_error_name(error, vigem_commons)}"
+                )
+            self.pad_attached[index] = False
+
+    def _reconnect_pads(self) -> None:
+        from vgamepad.win import vigem_client, vigem_commons
+
+        for index, pad in enumerate(self.pads):
+            if self.pad_attached[index]:
+                continue
+            error = vigem_client.vigem_target_add(pad._busp, pad._devicep)
+            if error != vigem_commons.VIGEM_ERRORS.VIGEM_ERROR_NONE:
+                raise RuntimeError(
+                    f"Unable to reconnect bridge pad {index + 1}: "
+                    f"{self._vigem_error_name(error, vigem_commons)}"
+                )
+            self.pad_attached[index] = True
+            pad.reset()
+            pad.update()
+        self._report_pad_slots()
+        self._notify("Both virtual controllers reconnected.", 2)
+
+    def _report_pad_slots(self) -> None:
+        from vgamepad.win import vigem_client, vigem_commons
+
+        for index, pad in enumerate(self.pads):
+            if self.pad_attached and not self.pad_attached[index]:
+                continue
+            user_index = wintypes.DWORD(0xFFFFFFFF)
+            error = vigem_client.vigem_target_x360_get_user_index(
+                pad._busp, pad._devicep, ctypes.byref(user_index)
+            )
+            if error == vigem_commons.VIGEM_ERRORS.VIGEM_ERROR_NONE:
+                print(f"Bridge pad {index + 1}: XInput slot {user_index.value}", flush=True)
+
     def _foreground_coop_pid(self) -> int:
         """Read-only guard for user-triggered F2; never control the game UI."""
         process_id = wintypes.DWORD()
@@ -764,6 +844,9 @@ class KeyboardGamepadBridge:
         while not self.stop_event.is_set():
             started = time.perf_counter()
             with self.lock:
+                pulse_active = started < self.disconnect_until
+                any_attached = any(self.pad_attached)
+                all_attached = bool(self.pad_attached) and all(self.pad_attached)
                 pressed = set(self.pressed)
                 active_player = self.active_player
                 capture_enabled = self.capture_enabled
@@ -786,6 +869,26 @@ class KeyboardGamepadBridge:
                     if deadline > now
                 }
 
+            try:
+                if pulse_active and any_attached:
+                    self._disconnect_pads()
+                    all_attached = False
+                elif not pulse_active and not all_attached:
+                    self._reconnect_pads()
+                    all_attached = True
+            except Exception as error:
+                with self.lock:
+                    self.disconnect_until = started + 0.5
+                self._notify(f"Virtual-controller reconnect error: {error}", -1)
+            finally:
+                all_attached = bool(self.pad_attached) and all(self.pad_attached)
+
+            if not all_attached:
+                remaining = interval - (time.perf_counter() - started)
+                if remaining > 0:
+                    self.stop_event.wait(remaining)
+                continue
+
             if capture_enabled and self.config.mouse_enabled:
                 target_x = self._mouse_axis(mouse_delta[0], self.config.mouse_sensitivity_x)
                 y_delta = mouse_delta[1] if self.config.mouse_invert_y else -mouse_delta[1]
@@ -805,6 +908,8 @@ class KeyboardGamepadBridge:
             demo_active = bool(demo_duration and foreground_pid.value == demo_game_pid)
 
             for index, pad in enumerate(self.pads):
+                if not self.pad_attached[index]:
+                    continue
                 pad.reset()
                 if capture_enabled and index == active_player:
                     self._apply_state(pad, pressed, tuple(mouse_stick), mouse_buttons, mouse_dpad)

@@ -135,10 +135,10 @@ target_compile_definitions(${FIX_PROJECT_NAME} PRIVATE
     "rsc_UpdateUrl=\"https://github.com/miraf001/WidescreenFixesPack\""
     rsc_FileVersion_MAJOR=0
     rsc_FileVersion_MINOR=1
-    rsc_FileVersion_BUILD=2
+    rsc_FileVersion_BUILD=10
     rsc_FileVersion_REVISION=0
-    "rsc_FileVersion=\"0.1.2\""
-    "rsc_ProductVersion=\"0.1.2-${FIX_GIT_SHA}\""
+    "rsc_FileVersion=\"0.1.10\""
+    "rsc_ProductVersion=\"0.1.10-${FIX_GIT_SHA}\""
     "rsc_GitSHA1=\"${FIX_GIT_SHA}\""
     "rsc_GitSHA1W=L\"${FIX_GIT_SHA}\""
 )

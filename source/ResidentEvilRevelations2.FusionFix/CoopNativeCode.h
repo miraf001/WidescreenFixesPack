@@ -19,6 +19,17 @@ constexpr uint32_t ActorManager = 0x1567EAC;
 constexpr uint32_t GeometrySite = 0xE6308A;
 constexpr uint32_t InputSite = 0x98861C;
 constexpr uint32_t ViewportGfxPointer = 0x15DE88C;
+constexpr uint32_t InteractionCandidateSite = 0x701955;
+constexpr uint32_t InteractionCandidateReturn = 0x70195B;
+constexpr uint32_t InteractionCandidateSkip = 0x701972;
+constexpr uint32_t InteractionCandidateAltSite = 0x701886;
+constexpr uint32_t InteractionCandidateAltReturn = 0x70188D;
+constexpr uint32_t InteractionCandidateAltSkip = 0x70189E;
+constexpr uint32_t ActionIconVtable = 0x013915B0;
+constexpr uint32_t ActionIcon2Vtable = 0x01391970;
+constexpr uint32_t TutorialVtable = 0x013BEDE0;
+constexpr uint32_t TutorialParserEntry = 0x009523D0;
+constexpr uint32_t TutorialParserControllerStackOffset = 0xFC;
 
 struct HudClass
 {
@@ -36,7 +47,7 @@ inline constexpr std::array<HudClass, 5> HudClasses = {{
 
 // MOV ESI,<actor register> encoding, followed by original CMP operand.
 struct InputGate { uint32_t site; uint8_t actorMov, cmpModRM; bool actorPredicate = false; };
-inline constexpr std::array<InputGate, 28> InputGates = {{
+inline constexpr std::array<InputGate, 29> InputGates = {{
     {0x7017D5, 0xF3, 0xB8}, {0x704635, 0xF6, 0xB9},
     {0xA126EF, 0xF7, 0xB9}, {0xA127F2, 0xF7, 0xB8},
     {0xA128D2, 0xF7, 0xB9}, {0xA12AA4, 0xF7, 0xB9},
@@ -51,7 +62,55 @@ inline constexpr std::array<InputGate, 28> InputGates = {{
     {0xA17E8A, 0xF7, 0xB8}, {0xA17FB4, 0xF7, 0xB8},
     {0xA18086, 0xF7, 0xB8}, {0xA1824D, 0xF7, 0xB8},
     {0xA1838F, 0xF3, 0xB8}, {0xA186E6, 0xF7, 0xB8},
+    // Interactable-object dispatcher. EBP is the actor selected from the
+    // native player index immediately before this global input-mode branch.
+    {0x40EF84, 0xF5, 0xB8},
 }};
+
+struct PromptInputGate
+{
+    uint32_t site;
+    uint8_t objectMov;
+    std::array<uint32_t, 2> vtables;
+    size_t count;
+};
+
+inline constexpr std::array<PromptInputGate, 5> PromptInputGates = {{
+    {0x0088DFBF, 0xF6, {ActionIconVtable, 0}, 1},
+    {0x0088E0F9, 0xF1, {ActionIconVtable, ActionIcon2Vtable}, 2},
+    {0x0088F57E, 0xF6, {ActionIcon2Vtable, 0}, 1},
+    {0x0088FF01, 0xF6, {ActionIcon2Vtable, 0}, 1},
+    {0x0088FFAF, 0xF6, {ActionIcon2Vtable, 0}, 1},
+}};
+
+inline constexpr std::array<uint32_t, 2> TutorialPromptSites = {{
+    0x009525F7, 0x0095265B,
+}};
+
+inline constexpr uint32_t FileTextVtable = 0x013999A8;
+inline constexpr uint32_t FileTextActiveMask = 0x200;
+
+inline bool ShouldReplayFileText(uint32_t vtable, uint32_t stateFlags,
+    bool dualMonitor, bool splitScreen, uint32_t physicalWidth,
+    uint32_t physicalHeight)
+{
+    return dualMonitor && splitScreen && vtable == FileTextVtable &&
+        (stateFlags & FileTextActiveMask) != 0 && physicalWidth >= 2 &&
+        (physicalWidth & 1) == 0 && physicalHeight != 0;
+}
+
+inline float FileTextReplayX(float originalX, uint32_t physicalWidth)
+{
+    return originalX + static_cast<float>(physicalWidth) * 0.5f;
+}
+
+struct FileTextReplayPosition
+{
+    float originalX;
+    uint32_t physicalWidth;
+    float ReplayX() const { return FileTextReplayX(originalX, physicalWidth); }
+    void Restore(float& target) const { target = originalX; }
+};
 
 inline Bytes Hex(const char* text)
 {
@@ -122,6 +181,138 @@ inline Bytes InputCode(uint32_t address, uint32_t counter, const InputGate& gate
     c.emit("f0 ff 05"); c.word(counter + 8);
     c.label("done");
     c.emit("61 9d"); c.jumpTo(address, gate.site + 7);
+    return c.finish(0x100);
+}
+
+inline Bytes InteractionCandidateOriginal()
+{
+    // mov eax,[esi+0x2d0] -- candidate state loaded before the native
+    // status-specific early-return tests in the P1 keyboard path.
+    return Hex("8b 86 d0 02 00 00");
+}
+
+inline Bytes InteractionCandidateCode(uint32_t address)
+{
+    Code c;
+    c.bytes = InteractionCandidateOriginal();
+    c.emit("9c 60");
+    c.emit("a1"); c.word(ModePointer);
+    c.emit("85 c0"); c.branch("0f 84", "native");
+    c.emit("83 b8 f0 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("83 b8 f4 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("8b 90 f8 08 00 00 83 fa 08"); c.branch("0f 83", "native");
+    c.emit("8b 0d"); c.word(ActorManager);
+    c.emit("85 c9"); c.branch("0f 84", "native");
+    c.emit("3b 5c 91 20"); c.branch("0f 85", "native");
+    c.emit("8b 90 fc 08 00 00");
+    c.emit("3b 96 ac 02 00 00"); c.branch("0f 85", "native");
+
+    // P1 must not inherit a shared candidate owned by assigned P2. Skip it
+    // before status 3..5/10 can reject P1's actor-local LMB action.
+    c.emit("61 9d"); c.jumpTo(address, InteractionCandidateSkip);
+    c.label("native");
+    c.emit("61 9d"); c.jumpTo(address, InteractionCandidateReturn);
+    return c.finish(0x100);
+}
+
+inline Bytes InteractionCandidateAltOriginal()
+{
+    // cmp dword ptr [edi+0x2d0],1 -- the earlier F/X interaction candidate
+    // group uses EDI rather than the E/A group's ESI state load.
+    return Hex("83 bf d0 02 00 00 01");
+}
+
+inline Bytes InteractionCandidateAltCode(uint32_t address)
+{
+    Code c;
+    c.bytes = InteractionCandidateAltOriginal();
+    c.emit("9c 60");
+    c.emit("a1"); c.word(ModePointer);
+    c.emit("85 c0"); c.branch("0f 84", "native_saved");
+    c.emit("83 b8 f0 08 00 00 01"); c.branch("0f 85", "native_saved");
+    c.emit("83 b8 f4 08 00 00 01"); c.branch("0f 85", "native_saved");
+    c.emit("8b 90 f8 08 00 00 83 fa 08"); c.branch("0f 83", "native_saved");
+    c.emit("8b 0d"); c.word(ActorManager);
+    c.emit("85 c9"); c.branch("0f 84", "native_saved");
+    c.emit("3b 5c 91 20"); c.branch("0f 85", "native_saved");
+    c.emit("8b 90 fc 08 00 00");
+    c.emit("3b 97 ac 02 00 00"); c.branch("0f 85", "native_saved");
+
+    // P1 must not be rejected by the P2-owned F/X prompt candidate.
+    c.emit("61 9d"); c.branch("e9", "skip_candidate");
+    c.label("native_saved");
+    c.emit("61 9d"); c.branch("e9", "native");
+    c.label("native");
+    c.jumpTo(address, InteractionCandidateAltReturn);
+    c.label("skip_candidate");
+    c.jumpTo(address, InteractionCandidateAltSkip);
+    return c.finish(0x100);
+}
+
+inline Bytes PromptInputOriginal()
+{
+    return Hex("83 b8 bc c4 15 00 01");
+}
+
+inline Bytes PromptInputCode(uint32_t address, const PromptInputGate& gate)
+{
+    Code c;
+    c.bytes = PromptInputOriginal();
+    c.emit("9c 60");
+    c.branch("0f 85", "native");
+    c.bytes.insert(c.bytes.end(), {0x8B, gate.objectMov});
+    c.emit("85 f6"); c.branch("0f 84", "native");
+    c.emit("8b 0e");
+    for (size_t i = 0; i < gate.count; ++i)
+    {
+        c.emit("81 f9"); c.word(gate.vtables[i]);
+        if (i + 1 < gate.count)
+            c.branch("0f 84", "class_ok");
+        else
+            c.branch("0f 85", "native");
+    }
+    c.label("class_ok");
+    c.emit("a1"); c.word(ModePointer);
+    c.emit("85 c0"); c.branch("0f 84", "native");
+    c.emit("83 b8 f0 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("83 b8 f4 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("8b 90 fc 08 00 00 83 fa 08"); c.branch("0f 83", "native");
+    c.emit("3b 96 ac 02 00 00"); c.branch("0f 85", "native");
+    // Clear only ZF so the untouched native JNE selects its gamepad path.
+    c.emit("83 64 24 20 bf");
+    c.label("native");
+    c.emit("61 9d"); c.jumpTo(address, gate.site + 7);
+    return c.finish(0x100);
+}
+
+inline Bytes TutorialParserFrameOriginal()
+{
+    // This build-pinned prologue establishes the parser frame used by both
+    // tutorial input gates. The async job's exact controller is at ESP+0xFC.
+    return Hex("81 ec c4 00 00 00 53 55 8b ac 24 d0 00 00 00 56 8b f5 57 89 4c 24 18");
+}
+
+inline Bytes TutorialPromptCode(uint32_t address, uint32_t site)
+{
+    Code c;
+    c.bytes = PromptInputOriginal();
+    c.emit("9c 60");
+    c.branch("0f 85", "native");
+    // pushfd+pushad moved the current gate ESP by 0x24.
+    c.emit("8b b4 24");
+    c.word(TutorialParserControllerStackOffset + 0x24);
+    c.emit("85 f6"); c.branch("0f 84", "native");
+    c.emit("81 3e"); c.word(TutorialVtable); c.branch("0f 85", "native");
+    c.emit("8b 8e ac 02 00 00 83 f9 08"); c.branch("0f 83", "native");
+    c.emit("8b 15"); c.word(ModePointer);
+    c.emit("85 d2"); c.branch("0f 84", "native");
+    c.emit("83 ba f0 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("83 ba f4 08 00 00 01"); c.branch("0f 85", "native");
+    c.emit("8b 92 fc 08 00 00 83 fa 08"); c.branch("0f 83", "native");
+    c.emit("3b ca"); c.branch("0f 85", "native");
+    c.emit("83 64 24 20 bf");
+    c.label("native");
+    c.emit("61 9d"); c.jumpTo(address, site + 7);
     return c.finish(0x100);
 }
 
