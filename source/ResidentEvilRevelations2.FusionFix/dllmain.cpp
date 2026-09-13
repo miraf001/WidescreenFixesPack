@@ -225,7 +225,182 @@ namespace rev2coop
     inline void PollBridgeCapture();
     inline void Report(const char* message);
 }
-namespace dualmonitor { void PollInstall(); }
+namespace customdisplay
+{
+    constexpr uintptr_t DisplayModeFinalizeAddress = 0x00CC6434;
+    constexpr uintptr_t RawModesOffset = 0x0043D84C;
+    constexpr uintptr_t RawModeCountOffset = 0x0044344C;
+    constexpr uint32_t RawModeCapacity = 0x100;
+
+    struct DisplayModeEntry
+    {
+        char resolutionText[0x40] = {};
+        char refreshText[0x10] = {};
+        uint32_t width = 0;
+        uint32_t height = 0;
+        float refreshRate = 0.0f;
+    };
+    static_assert(sizeof(DisplayModeEntry) == 0x5C);
+
+    static bool gEnabled = false;
+    static uint32_t gWidth = 0;
+    static uint32_t gHeight = 0;
+    static uint32_t gRefreshRate = 0;
+    static int gWindowX = 0;
+    static int gWindowY = 0;
+
+    static bool IsValid(uint32_t width, uint32_t height,
+        uint32_t refreshRate)
+    {
+        return width >= 2 && height >= 1 && refreshRate >= 1 &&
+            width <= 32768 && height <= 32768 && refreshRate <= 1000;
+    }
+
+    void Configure(bool enabled, uint32_t width, uint32_t height,
+        uint32_t refreshRate, int windowX, int windowY)
+    {
+        gEnabled = enabled && IsValid(width, height, refreshRate);
+        gWidth = width;
+        gHeight = height;
+        gRefreshRate = refreshRate;
+        gWindowX = windowX;
+        gWindowY = windowY;
+    }
+
+    bool GetResolution(uint32_t& width, uint32_t& height)
+    {
+        if (!gEnabled)
+            return false;
+        width = gWidth;
+        height = gHeight;
+        return true;
+    }
+
+    bool IsEnabled()
+    {
+        return gEnabled;
+    }
+
+    int GetWindowX()
+    {
+        return gWindowX;
+    }
+
+    int GetWindowY()
+    {
+        return gWindowY;
+    }
+
+    static bool WriteGameDisplayConfig()
+    {
+        if (!gEnabled)
+            return true;
+
+        wchar_t localAppData[MAX_PATH] = {};
+        const auto localLength = GetEnvironmentVariableW(
+            L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
+        if (!localLength || localLength >= ARRAYSIZE(localAppData))
+            return false;
+
+        wchar_t configPath[MAX_PATH] = {};
+        if (swprintf_s(configPath, ARRAYSIZE(configPath),
+                L"%s\\CAPCOM\\RESIDENT EVIL "
+                L"REVELATIONS2\\config.ini", localAppData) < 0)
+        {
+            return false;
+        }
+
+        wchar_t resolution[32] = {};
+        wchar_t refreshRate[32] = {};
+        if (swprintf_s(resolution, ARRAYSIZE(resolution), L"%ux%u",
+                gWidth, gHeight) < 0 ||
+            swprintf_s(refreshRate, ARRAYSIZE(refreshRate), L"%u.00Hz",
+                gRefreshRate) < 0)
+        {
+            return false;
+        }
+
+        return WritePrivateProfileStringW(
+                   L"DISPLAY", L"Resolution", resolution, configPath) &&
+            WritePrivateProfileStringW(
+                   L"DISPLAY", L"RefreshRate", refreshRate, configPath) &&
+            WritePrivateProfileStringW(
+                   L"DISPLAY", L"FullScreen", L"OFF", configPath);
+    }
+
+    static bool AppendMode(uintptr_t owner)
+    {
+        if (!gEnabled || !owner)
+            return false;
+
+        auto* count = reinterpret_cast<uint32_t*>(
+            owner + RawModeCountOffset);
+        auto* modes = reinterpret_cast<DisplayModeEntry*>(
+            owner + RawModesOffset);
+        if (IsBadReadPtr(count, sizeof(*count)) ||
+            IsBadWritePtr(count, sizeof(*count)) ||
+            *count >= RawModeCapacity ||
+            IsBadWritePtr(modes, sizeof(DisplayModeEntry) * RawModeCapacity))
+        {
+            return false;
+        }
+
+        for (uint32_t index = 0; index < *count; ++index)
+        {
+            if (modes[index].width == gWidth &&
+                modes[index].height == gHeight &&
+                std::fabs(modes[index].refreshRate -
+                    static_cast<float>(gRefreshRate)) < 0.01f)
+            {
+                return true;
+            }
+        }
+
+        DisplayModeEntry entry = {};
+        if (sprintf_s(entry.resolutionText, "%ux%u", gWidth, gHeight) < 0 ||
+            sprintf_s(entry.refreshText, "%u.00Hz", gRefreshRate) < 0)
+        {
+            return false;
+        }
+        entry.width = gWidth;
+        entry.height = gHeight;
+        entry.refreshRate = static_cast<float>(gRefreshRate);
+        modes[*count] = entry;
+        ++*count;
+        return true;
+    }
+
+    bool Install()
+    {
+        if (!gEnabled)
+            return true;
+
+        constexpr uint8_t expected[] = {
+            0x33, 0xDB,             // xor ebx,ebx
+            0x33, 0xFF,             // xor edi,edi
+            0x89, 0x7C, 0x24, 0x24 // mov [esp+24],edi
+        };
+        if (std::memcmp(reinterpret_cast<const void*>(
+                DisplayModeFinalizeAddress), expected, sizeof(expected)) != 0)
+        {
+            return false;
+        }
+
+        static auto displayModeHook = safetyhook::create_mid(
+            DisplayModeFinalizeAddress, [](SafetyHookContext& regs)
+            {
+                AppendMode(regs.ebp);
+            });
+        return static_cast<bool>(displayModeHook);
+    }
+}
+
+namespace dualmonitor
+{
+    void PollInstall();
+    void PollSelectedResolution();
+    void MarkCommonMenuDrawn();
+}
 
 DWORD WINAPI IniHotkeyThread(LPVOID)
 {
@@ -239,6 +414,7 @@ DWORD WINAPI IniHotkeyThread(LPVOID)
         }
 
         dualmonitor::PollInstall();
+        dualmonitor::PollSelectedResolution();
         rev2coop::PollBridgeCapture();
         Sleep(20); // Bridge F9 synchronization stays off the game/render thread.
     }
@@ -1443,6 +1619,7 @@ void __fastcall sub_E18040_pause_common_menu(int _this, int edx, int a2)
         return sub_E18040_rescale(_this, edx, a2);
     }
 
+    dualmonitor::MarkCommonMenuDrawn();
     InterlockedExchange(&gActivePauseCommonMenu, static_cast<LONG>(object));
     return RenderPauseGuiForDualMonitors(_this, edx, a2);
 }
@@ -1738,12 +1915,18 @@ namespace dualmonitor
     constexpr uintptr_t NormalCameraVtable = 0x01264F30;
     constexpr uintptr_t EventMotionCameraVtable = 0x01264FE0;
     constexpr UINT BackbufferValidationInterval = 300;
+    constexpr ULONGLONG ResolutionPollIntervalMs = 250;
 
     struct RuntimeState
     {
         IDirect3DDevice9* device = nullptr;
         IDirect3DSurface9* backbuffer = nullptr;
         IDirect3DSurface9* intermediate = nullptr;
+        IDirect3DSurface9* frontendSnapshot = nullptr;
+        UINT surfaceWidth = 0;
+        UINT surfaceHeight = 0;
+        // Width/height are always the resolution selected by the player. They
+        // are deliberately independent from a larger wrapper/presenter surface.
         UINT width = 0;
         UINT height = 0;
         D3DFORMAT format = D3DFMT_UNKNOWN;
@@ -1752,13 +1935,18 @@ namespace dualmonitor
         bool initialLayoutPending = true;
         bool previousSplit = false;
         bool dualWasEnabled = false;
+        bool frontendLayoutActive = false;
+        bool gameplaySeen = false;
     };
 
     static RuntimeState gState;
+    alignas(8) static volatile LONG64 gSelectedResolution = 0;
+    static volatile LONG gCommonMenuDrawn = 0;
     static volatile LONG gInstallRequested = 0;
     static volatile LONG gInstallFinished = 0;
     static volatile LONG gInstallBusy = 0;
     static ULONGLONG gNextInstallAttempt = 0;
+    static ULONGLONG gNextResolutionPoll = 0;
 
     static uint8_t* GetGraphics()
     {
@@ -1776,6 +1964,113 @@ namespace dualmonitor
     {
         return reinterpret_cast<uint8_t*>(
             *reinterpret_cast<uintptr_t*>(SplitControllerPointer));
+    }
+
+    static bool IsValidSelectedResolution(UINT width, UINT height)
+    {
+        constexpr UINT MaxDimension = 32768;
+        return width >= 2 && (width & 1) == 0 && height >= 1 &&
+            width <= MaxDimension && height <= MaxDimension;
+    }
+
+    static LONG64 PackResolution(UINT width, UINT height)
+    {
+        return static_cast<LONG64>(
+            (static_cast<uint64_t>(width) << 32) | height);
+    }
+
+    static bool GetSelectedResolution(UINT& width, UINT& height)
+    {
+        const auto packed = static_cast<uint64_t>(
+            InterlockedCompareExchange64(&gSelectedResolution, 0, 0));
+        width = static_cast<UINT>(packed >> 32);
+        height = static_cast<UINT>(packed & 0xFFFFFFFFu);
+        return IsValidSelectedResolution(width, height);
+    }
+
+    static bool ReadSelectedResolutionFromConfig(UINT& width, UINT& height)
+    {
+        uint32_t customWidth = 0;
+        uint32_t customHeight = 0;
+        if (customdisplay::GetResolution(customWidth, customHeight))
+        {
+            width = customWidth;
+            height = customHeight;
+            return IsValidSelectedResolution(width, height);
+        }
+
+        wchar_t localAppData[MAX_PATH] = {};
+        const auto localLength = GetEnvironmentVariableW(
+            L"LOCALAPPDATA", localAppData, ARRAYSIZE(localAppData));
+        if (!localLength || localLength >= ARRAYSIZE(localAppData))
+            return false;
+
+        wchar_t configPath[MAX_PATH] = {};
+        if (swprintf_s(configPath, ARRAYSIZE(configPath),
+                L"%s\\CAPCOM\\RESIDENT EVIL "
+                L"REVELATIONS2\\config.ini", localAppData) < 0)
+        {
+            return false;
+        }
+
+        wchar_t value[64] = {};
+        if (!GetPrivateProfileStringW(L"DISPLAY", L"Resolution", L"",
+                value, ARRAYSIZE(value), configPath))
+        {
+            return false;
+        }
+
+        auto* separator = wcschr(value, L'x');
+        if (!separator)
+            separator = wcschr(value, L'X');
+        if (!separator)
+            return false;
+        *separator = L'\0';
+
+        wchar_t* widthEnd = nullptr;
+        wchar_t* heightEnd = nullptr;
+        const auto parsedWidth = wcstoul(value, &widthEnd, 10);
+        const auto parsedHeight = wcstoul(separator + 1, &heightEnd, 10);
+        if (!widthEnd || *widthEnd != L'\0' || !heightEnd ||
+            *heightEnd != L'\0' ||
+            parsedWidth > (std::numeric_limits<UINT>::max)() ||
+            parsedHeight > (std::numeric_limits<UINT>::max)())
+        {
+            return false;
+        }
+
+        width = static_cast<UINT>(parsedWidth);
+        height = static_cast<UINT>(parsedHeight);
+        return IsValidSelectedResolution(width, height);
+    }
+
+    static bool RefreshSelectedResolutionFromConfig()
+    {
+        UINT width = 0;
+        UINT height = 0;
+        if (!ReadSelectedResolutionFromConfig(width, height))
+            return false;
+
+        InterlockedExchange64(&gSelectedResolution,
+            PackResolution(width, height));
+        return true;
+    }
+
+    void PollSelectedResolution()
+    {
+        if (!bDualMonitorMode)
+            return;
+        const auto now = GetTickCount64();
+        if (now < gNextResolutionPoll)
+            return;
+        gNextResolutionPoll = now + ResolutionPollIntervalMs;
+        RefreshSelectedResolutionFromConfig();
+    }
+
+    void MarkCommonMenuDrawn()
+    {
+        if (bDualMonitorMode)
+            InterlockedExchange(&gCommonMenuDrawn, 1);
     }
 
     static RECT ReadRect(uint8_t* address)
@@ -1797,24 +2092,41 @@ namespace dualmonitor
             rect.right == right && rect.bottom == bottom;
     }
 
-    static void ReleaseSurfaces()
+    static void ReleaseDerivedSurfaces()
     {
+        if (gState.frontendSnapshot)
+        {
+            gState.frontendSnapshot->Release();
+            gState.frontendSnapshot = nullptr;
+        }
         if (gState.intermediate)
         {
             gState.intermediate->Release();
             gState.intermediate = nullptr;
         }
+    }
+
+    static void ReleaseSurfaces()
+    {
+        ReleaseDerivedSurfaces();
         if (gState.backbuffer)
         {
             gState.backbuffer->Release();
             gState.backbuffer = nullptr;
         }
+        gState.surfaceWidth = 0;
+        gState.surfaceHeight = 0;
     }
 
     static bool RefreshBackbuffer(bool force)
     {
         if (!gState.device || (!force && gState.backbuffer))
             return gState.backbuffer != nullptr;
+
+        UINT selectedWidth = 0;
+        UINT selectedHeight = 0;
+        if (!GetSelectedResolution(selectedWidth, selectedHeight))
+            return false;
 
         IDirect3DSurface9* current = nullptr;
         if (FAILED(gState.device->GetBackBuffer(
@@ -1823,30 +2135,46 @@ namespace dualmonitor
             return false;
         }
 
-        if (current == gState.backbuffer)
-        {
-            // GetBackBuffer returned an additional COM reference.
-            current->Release();
-            gState.validationCountdown = BackbufferValidationInterval;
-            return true;
-        }
-
         D3DSURFACE_DESC description = {};
         if (FAILED(current->GetDesc(&description)) ||
-            description.Width < 2 || (description.Width & 1) != 0 ||
-            description.Height == 0)
+            description.Width < selectedWidth ||
+            description.Height < selectedHeight)
         {
             current->Release();
             return false;
         }
 
-        ReleaseSurfaces();
-        gState.backbuffer = current;
-        gState.width = description.Width;
-        gState.height = description.Height;
+        const bool surfaceChanged = current != gState.backbuffer ||
+            description.Width != gState.surfaceWidth ||
+            description.Height != gState.surfaceHeight ||
+            description.Format != gState.format;
+        const bool canvasChanged = selectedWidth != gState.width ||
+            selectedHeight != gState.height;
+
+        if (current != gState.backbuffer)
+        {
+            ReleaseSurfaces();
+            gState.backbuffer = current;
+        }
+        else
+        {
+            // GetBackBuffer returned an additional COM reference.
+            current->Release();
+            if (surfaceChanged || canvasChanged)
+                ReleaseDerivedSurfaces();
+        }
+
+        gState.surfaceWidth = description.Width;
+        gState.surfaceHeight = description.Height;
+        gState.width = selectedWidth;
+        gState.height = selectedHeight;
         gState.format = description.Format;
-        gState.layoutInitialized = false;
-        gState.initialLayoutPending = true;
+        if (surfaceChanged || canvasChanged)
+        {
+            gState.layoutInitialized = false;
+            gState.initialLayoutPending = true;
+            gState.frontendLayoutActive = false;
+        }
         gState.validationCountdown = BackbufferValidationInterval;
         return true;
     }
@@ -1860,6 +2188,118 @@ namespace dualmonitor
             gState.width / 2, gState.height, gState.format,
             D3DMULTISAMPLE_NONE, 0, FALSE, &gState.intermediate, nullptr)) &&
             gState.intermediate != nullptr;
+    }
+
+    static bool EnsureFrontendSnapshot()
+    {
+        if (gState.frontendSnapshot)
+            return true;
+
+        return SUCCEEDED(gState.device->CreateRenderTarget(
+            gState.width, gState.height, gState.format,
+            D3DMULTISAMPLE_NONE, 0, FALSE,
+            &gState.frontendSnapshot, nullptr)) &&
+            gState.frontendSnapshot != nullptr;
+    }
+
+    static bool IsNarrowDualCanvas()
+    {
+        // A half of a canvas narrower than 16:9 cannot contain the native
+        // frontend without fitting. Equivalent test: W/H < 32/9.
+        return gState.width > 0 && gState.height > 0 &&
+            static_cast<uint64_t>(gState.width) * 9 <
+            static_cast<uint64_t>(gState.height) * 32;
+    }
+
+    static bool HasNormalGameplayCamera()
+    {
+        auto graphics = GetGraphics();
+        if (!graphics || IsBadReadPtr(
+                graphics + Screen0CameraOffset, sizeof(uintptr_t)))
+        {
+            return false;
+        }
+
+        const auto camera = *reinterpret_cast<uintptr_t*>(
+            graphics + Screen0CameraOffset);
+        return camera && !IsBadReadPtr(
+            reinterpret_cast<void*>(camera), sizeof(uintptr_t)) &&
+            *reinterpret_cast<uintptr_t*>(camera) == NormalCameraVtable;
+    }
+
+    static bool FitFullCanvasToBoth()
+    {
+        if (!gState.backbuffer || !EnsureFrontendSnapshot())
+            return false;
+
+        const RECT source = {
+            0, 0, static_cast<LONG>(gState.width),
+            static_cast<LONG>(gState.height)
+        };
+        const auto halfWidth = gState.width / 2;
+        const float scale = (std::min)(
+            static_cast<float>(halfWidth) / static_cast<float>(gState.width),
+            1.0f);
+        const auto fittedWidth = static_cast<LONG>(std::lround(
+            static_cast<float>(gState.width) * scale));
+        const auto fittedHeight = static_cast<LONG>(std::lround(
+            static_cast<float>(gState.height) * scale));
+        const auto leftX = (static_cast<LONG>(halfWidth) - fittedWidth) / 2;
+        const auto top = (static_cast<LONG>(gState.height) - fittedHeight) / 2;
+        const RECT left = {
+            leftX, top, leftX + fittedWidth, top + fittedHeight
+        };
+        const RECT right = {
+            static_cast<LONG>(halfWidth) + leftX, top,
+            static_cast<LONG>(halfWidth) + leftX + fittedWidth,
+            top + fittedHeight
+        };
+
+        HRESULT result = gState.device->StretchRect(
+            gState.backbuffer, &source, gState.frontendSnapshot,
+            nullptr, D3DTEXF_NONE);
+        if (SUCCEEDED(result))
+            result = gState.device->ColorFill(
+                gState.backbuffer, &source, D3DCOLOR_ARGB(255, 0, 0, 0));
+        if (SUCCEEDED(result))
+            result = gState.device->StretchRect(
+                gState.frontendSnapshot, nullptr, gState.backbuffer,
+                &left, D3DTEXF_LINEAR);
+        if (SUCCEEDED(result))
+            result = gState.device->StretchRect(
+                gState.frontendSnapshot, nullptr, gState.backbuffer,
+                &right, D3DTEXF_LINEAR);
+        return SUCCEEDED(result);
+    }
+
+    static void ClearOutsideSelectedCanvas()
+    {
+        if (!gState.backbuffer ||
+            (gState.surfaceWidth == gState.width &&
+             gState.surfaceHeight == gState.height))
+        {
+            return;
+        }
+
+        constexpr auto black = D3DCOLOR_ARGB(255, 0, 0, 0);
+        if (gState.surfaceWidth > gState.width)
+        {
+            const RECT right = {
+                static_cast<LONG>(gState.width), 0,
+                static_cast<LONG>(gState.surfaceWidth),
+                static_cast<LONG>(gState.surfaceHeight)
+            };
+            gState.device->ColorFill(gState.backbuffer, &right, black);
+        }
+        if (gState.surfaceHeight > gState.height)
+        {
+            const RECT bottom = {
+                0, static_cast<LONG>(gState.height),
+                static_cast<LONG>(gState.width),
+                static_cast<LONG>(gState.surfaceHeight)
+            };
+            gState.device->ColorFill(gState.backbuffer, &bottom, black);
+        }
     }
 
     static void RestoreFullLogicalCaches()
@@ -1902,6 +2342,21 @@ namespace dualmonitor
         *reinterpret_cast<uint8_t*>(graphics + LayoutDirtyOffset) = 1;
         reinterpret_cast<void(__thiscall*)(void*)>(
             UpdateLayoutAddress)(graphics);
+    }
+
+    static bool ApplyFullCanvasFrontendLayout()
+    {
+        auto graphics = GetGraphics();
+        if (!graphics || !gState.width || !gState.height)
+            return false;
+
+        RestoreFullLogicalCaches();
+        WriteRect(graphics + Screen1FallbackRectOffset,
+            0, 0, static_cast<LONG>(gState.width),
+            static_cast<LONG>(gState.height));
+        RebuildCurrentNativeLayout();
+        gState.frontendLayoutActive = true;
+        return true;
     }
 
     static uintptr_t GetScreen0PreservableCamera(
@@ -2007,6 +2462,7 @@ namespace dualmonitor
         gState.layoutInitialized = false;
         gState.initialLayoutPending = true;
         gState.previousSplit = false;
+        gState.frontendLayoutActive = false;
     }
 
     static void InitializeLayoutState()
@@ -2017,6 +2473,7 @@ namespace dualmonitor
         RestoreFullLogicalCaches();
         gState.layoutInitialized = true;
         gState.initialLayoutPending = true;
+        gState.frontendLayoutActive = false;
         // Treat an already active split as a transition so native screen 0/1
         // ownership is rebuilt once after startup or a device reset.
         gState.previousSplit = false;
@@ -2070,7 +2527,13 @@ namespace dualmonitor
 
         const bool splitBeforeRefresh = IsSplitScreenActive();
         const bool enteringNonSplit = gState.previousSplit && !splitBeforeRefresh;
-        bool validateBackbuffer = !gState.backbuffer || enteringNonSplit;
+        UINT selectedWidth = 0;
+        UINT selectedHeight = 0;
+        const bool selectedChanged =
+            GetSelectedResolution(selectedWidth, selectedHeight) &&
+            (selectedWidth != gState.width || selectedHeight != gState.height);
+        bool validateBackbuffer = !gState.backbuffer || enteringNonSplit ||
+            selectedChanged;
         if (!splitBeforeRefresh && !validateBackbuffer)
         {
             if (gState.validationCountdown == 0)
@@ -2088,6 +2551,11 @@ namespace dualmonitor
 
         const bool split = IsSplitScreenActive();
         const bool enteredSplit = !gState.previousSplit && split;
+        const bool commonMenuDrawn =
+            InterlockedExchange(&gCommonMenuDrawn, 0) != 0;
+        const bool normalGameplayCamera = HasNormalGameplayCamera();
+        if (split || normalGameplayCamera)
+            gState.gameplaySeen = true;
         if (gState.previousSplit && !split)
             gState.initialLayoutPending = true;
         gState.previousSplit = split;
@@ -2100,15 +2568,47 @@ namespace dualmonitor
         {
             // Logical caches may be restored every frame. Screen slots remain
             // exclusively owned by the native co-op layout after this edge.
+            const bool leavingFrontend = gState.frontendLayoutActive;
+            gState.frontendLayoutActive = false;
             RestoreFullLogicalCaches();
-            if (enteredSplit)
+            if (enteredSplit || leavingFrontend)
             {
                 WriteRect(graphics + Screen1FallbackRectOffset,
                     0, 0, static_cast<LONG>(gState.width),
                     static_cast<LONG>(gState.height));
                 RebuildCurrentNativeLayout();
             }
+            ClearOutsideSelectedCanvas();
             return;
+        }
+
+        const bool frontendFrame = IsNarrowDualCanvas() &&
+            (!gState.gameplaySeen ||
+             (commonMenuDrawn && !normalGameplayCamera));
+        if (frontendFrame)
+        {
+            if (!gState.frontendLayoutActive)
+            {
+                ApplyFullCanvasFrontendLayout();
+                ClearOutsideSelectedCanvas();
+                return;
+            }
+
+            RestoreFullLogicalCaches();
+            if (!FitFullCanvasToBoth())
+            {
+                ReleaseDerivedSurfaces();
+                gState.frontendLayoutActive = false;
+                gState.initialLayoutPending = true;
+            }
+            ClearOutsideSelectedCanvas();
+            return;
+        }
+
+        if (gState.frontendLayoutActive)
+        {
+            gState.frontendLayoutActive = false;
+            gState.initialLayoutPending = true;
         }
 
         ApplyHalfLogicalState();
@@ -2116,6 +2616,7 @@ namespace dualmonitor
         {
             gState.initialLayoutPending = false;
             ApplyNativeLeftLayout();
+            ClearOutsideSelectedCanvas();
             return;
         }
 
@@ -2124,10 +2625,12 @@ namespace dualmonitor
                 static_cast<LONG>(gState.height)))
         {
             ApplyNativeLeftLayout();
+            ClearOutsideSelectedCanvas();
             return;
         }
 
         MirrorLeftToBoth();
+        ClearOutsideSelectedCanvas();
     }
 
     static HRESULT __stdcall ResetHook(IDirect3DDevice9* device,
@@ -2141,6 +2644,7 @@ namespace dualmonitor
             gState.layoutInitialized = false;
             gState.initialLayoutPending = true;
             gState.previousSplit = false;
+            gState.frontendLayoutActive = false;
         }
         return gDualMonitorResetHook.unsafe_stdcall<HRESULT>(device, parameters);
     }
@@ -2159,7 +2663,8 @@ namespace dualmonitor
     {
         auto graphics = GetGraphics();
         const bool target = bDualMonitorMode && gState.layoutInitialized &&
-            !IsSplitScreenActive() && graphics && rect &&
+            !gState.frontendLayoutActive && !IsSplitScreenActive() &&
+            graphics && rect &&
             rect[0] == 0 && rect[1] == 0 && rect[2] == 1280 && rect[3] == 720;
         RECT originalActiveRect = {};
         if (target)
@@ -2179,6 +2684,9 @@ namespace dualmonitor
 
     static InstallAttempt TryInstall()
     {
+        if (!RefreshSelectedResolutionFromConfig())
+            return InstallAttempt::NotReady;
+
         auto renderer = GetRenderer();
         if (!renderer)
             return InstallAttempt::NotReady;
@@ -2209,6 +2717,11 @@ namespace dualmonitor
         injector::MakeCALL(NativeRectConverterCall,
             SingleScreenRectConverter, true);
         return InstallAttempt::Installed;
+    }
+
+    bool IsFrontendLayoutActive()
+    {
+        return gState.frontendLayoutActive;
     }
 
     static void RequestInstall()
@@ -2398,6 +2911,37 @@ void Init()
     bDisableCreateQuery = iniReader.ReadInteger("MAIN", "DisableCreateQuery", 0) != 0;
     auto bAutoclicker = iniReader.ReadInteger("MAIN", "Autoclicker", 0) != 0;
     nForceLogo = std::clamp(iniReader.ReadInteger("MAIN", "ForceLogo", 0), 0, 4);
+    const auto bForceCustomResolution =
+        iniReader.ReadInteger("DISPLAY", "ForceCustomResolution", 0) != 0;
+    const auto customWidth = static_cast<uint32_t>((std::max)(
+        iniReader.ReadInteger("DISPLAY", "CustomWidth", 3840), 0));
+    const auto customHeight = static_cast<uint32_t>((std::max)(
+        iniReader.ReadInteger("DISPLAY", "CustomHeight", 1080), 0));
+    const auto customRefreshRate = static_cast<uint32_t>((std::max)(
+        iniReader.ReadInteger("DISPLAY", "CustomRefreshRate", 60), 0));
+    const auto customWindowX =
+        iniReader.ReadInteger("DISPLAY", "WindowPosX", 0);
+    const auto customWindowY =
+        iniReader.ReadInteger("DISPLAY", "WindowPosY", 0);
+    customdisplay::Configure(bForceCustomResolution,
+        customWidth, customHeight, customRefreshRate,
+        customWindowX, customWindowY);
+    WindowedModeWrapper::bBorderlessWindowed = bBorderlessWindowed;
+    WindowedModeWrapper::bForceClientSize = customdisplay::IsEnabled();
+    WindowedModeWrapper::bForceWindowPosition = customdisplay::IsEnabled();
+    if (customdisplay::IsEnabled())
+    {
+        WindowedModeWrapper::desiredClientWidth = customWidth;
+        WindowedModeWrapper::desiredClientHeight = customHeight;
+        WindowedModeWrapper::desiredWindowX = customdisplay::GetWindowX();
+        WindowedModeWrapper::desiredWindowY = customdisplay::GetWindowY();
+        rev2coop::Report(customdisplay::Install()
+            ? "[DISPLAY] Custom mode appended during native enumeration"
+            : "[DISPLAY] Custom mode hook skipped: native code guard failed");
+        rev2coop::Report(customdisplay::WriteGameDisplayConfig()
+            ? "[DISPLAY] Custom windowed resolution written to game config"
+            : "[DISPLAY] Failed to write custom resolution to game config");
+    }
     LoadHudTuningFromIni(); // ✅ Load your [HUD] values from INI
     if (iniReader.ReadInteger("GRAPHICS", "DisableCoopEffectFilter", 0) != 0)
         DisableCoopEffectExclusionFilter();
@@ -2468,7 +3012,8 @@ void Init()
                 g_device->SetVertexShader(g_myScreenVertexShader);
                 float horzScaleFactor = defaultAspectRatio / GetAspectRatio();
                 float horizontalOffset = 0.0f;
-                if (bDualMonitorMode && !IsSplitScreenActive())
+                if (bDualMonitorMode && !IsSplitScreenActive() &&
+                    !dualmonitor::IsFrontendLayoutActive())
                 {
                     uint32_t physicalWidth = 0;
                     uint32_t physicalHeight = 0;
@@ -2650,7 +3195,7 @@ void Init()
         injector::WriteMemory(uGUICommandFar, sub_E18040_nop, true);
     }
 
-    if (bBorderlessWindowed)
+    if (bBorderlessWindowed || customdisplay::IsEnabled())
     {
         IATHook::Replace(GetModuleHandleA(NULL), "USER32.DLL",
             std::forward_as_tuple("CreateWindowExA", WindowedModeWrapper::CreateWindowExA_Hook),
@@ -2658,7 +3203,8 @@ void Init()
             std::forward_as_tuple("SetWindowLongA", WindowedModeWrapper::SetWindowLongA_Hook),
             std::forward_as_tuple("SetWindowLongW", WindowedModeWrapper::SetWindowLongW_Hook),
             std::forward_as_tuple("AdjustWindowRect", WindowedModeWrapper::AdjustWindowRect_Hook),
-            std::forward_as_tuple("SetWindowPos", WindowedModeWrapper::SetWindowPos_Hook)
+            std::forward_as_tuple("SetWindowPos", WindowedModeWrapper::SetWindowPos_Hook),
+            std::forward_as_tuple("MoveWindow", WindowedModeWrapper::MoveWindow_Hook)
         );
     }
 

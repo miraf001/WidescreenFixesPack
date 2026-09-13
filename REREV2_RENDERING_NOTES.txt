@@ -2944,3 +2944,78 @@ Pro dalsi vykonovou kapitolu je doporucene poradi:
 V produkci zustava pouze live potvrzeny `DisableCreateQuery=1`. Ten odstranil
 skutecny per-frame GPU event-query stall a zvysil Present frekvenci priblizne
 z 105.6 na 158.6/s bez pozorovaneho obrazoveho problemu.
+
+LOGICKE ROZLISENI A NIZKY DUAL-MONITOR FRONTEND 2026-09-13
+----------------------------------------------------------
+
+Dual-monitor renderer drive povazoval fyzicky D3D9 backbuffer za rozliseni,
+jez si zvolil hrac. To je chybne u presenteru/wrapperu, ktery muze vytvorit
+vetsi fyzickou plochu nez logicky herni canvas. Produkce proto drzi dva rozmery
+oddelene:
+
+    surfaceWidth/surfaceHeight  skutecny D3D9 render target
+    width/height                logicke rozliseni vybrane hracem
+
+Logicke rozliseni se cte z CAPCOM `config.ini` a obnovuje po 250 ms, aby se
+zachytila zmena rozliseni v menu. Backbuffer je platny pouze pokud je alespon
+tak velky jako zvoleny canvas. Vetsi nepouzita prava/spodni oblast se cisti na
+cerne; nikdy se z ni nepocitaji viewporty ani GUI. Tato zmena odstranila stav,
+kdy zvolene 1920x1080 pouzivalo poloviny fyzickeho presenteru 3840x1080.
+
+Pro uzky dual canvas, kde `W/H < 32/9` (napr. celkovych 1920x1080), nema kazda
+polovina dostatecny pomer stran pro nativni frontend. Pred gameplayem a pri
+detekovanem hlavnim menu se proto hotovy plny frontend zachyti, rovnomerne
+zmensi se zachovanim aspect ratio, vycentruje do leve poloviny a zkopiruje do
+prave. Pri vstupu do gameplaye/split screenu se tato vetev vypne a obnovi se
+nativni dual-monitor viewporty. Uzivatel potvrdil, ze takto je uvodni obrazovka
+a hlavni menu na 1920x1080 pouzitelne, zatimco 3840x1080 si zachovava drive
+overene chovani.
+
+VOLITELNE VLASTNI OKENNI ROZLISENI 2026-09-13
+--------------------------------------------
+
+Fakefinity zustava nezavisly testovaci presenter a ASI do nej nezasahuje.
+Novy volitelny `[DISPLAY] ForceCustomResolution` umoznuje hre samotne vytvorit
+okenni D3D9 backbuffer, jehoz rozliseni monitor neinzeruje. Vychozi distribucni
+hodnota je 0, tedy bez zmeny pro existujici uzivatele.
+
+Nativni builder seznamu modu je `0x00CC6320`. Hook se vklada pred deduplikaci
+na `0x00CC6434` a je chranen presnymi puvodnimi bajty
+`33 DB 33 FF 89 7C 24 24`. Owner v EBP obsahuje raw pole na `+0x43D84C`, pocet
+na `+0x44344C` a kapacitu 0x100 zaznamu. Jeden zaznam ma 0x5C bajtu:
+
+    +0x00  char resolution[0x40]
+    +0x40  char refresh[0x10]
+    +0x50  uint32 width
+    +0x54  uint32 height
+    +0x58  float refresh
+
+Pozadovany zaznam se prida jen pokud presna trojice jeste chybi a je volne
+misto. Pred startem rendereru se stejna hodnota zapise do CAPCOM `config.ini`
+spolu s `FullScreen=OFF`. Dual-monitor logika pouzije stejne vlastni rozmery
+rovnou jako logicky canvas, takze nemuze znovu omylem sahnout po rozmeru
+monitoru nebo presenteru.
+
+Window wrapper pri zapnute volbe vynucuje presny klientsky rozmer i pozici z
+`CustomWidth`, `CustomHeight`, `WindowPosX` a `WindowPosY`. Zaporne souradnice
+jsou povolene. V bordered rezimu se vnejsi rozmer dopocte z ramecku; v
+borderless rezimu se pozice i rozmer znovu aplikuji po finalni zmene stylu a
+po pozdejsich `SetWindowPos`/`MoveWindow` volanich hry.
+
+Live overeni bez aktivni Fakefinity DLL:
+
+    bordered, INI (0,0):
+        window [0,0,3856,1119]
+        client 3840x1080
+        CAPCOM Resolution=3840x1080, FullScreen=OFF
+        interni renderer 3840x1080
+
+    borderless, INI (-997,0):
+        window [-997,0,2843,1080]
+        client 3840x1080
+        interni renderer 3840x1080
+
+`CustomRefreshRate` je zaznam pro herni cache; v okennim rezimu neprepina
+fyzickou obnovovaci frekvenci monitoru. Soucasny build nema automaticky
+fallback pri nepodporovanem extremnim rozmeru, proto funkce zustava opt-in.
+Byte guard ji omezuje na potvrzeny Steam `rerev2.exe` Ver.5.00.

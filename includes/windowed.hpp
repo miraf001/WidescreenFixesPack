@@ -9,9 +9,13 @@ namespace WindowedModeWrapper
     static bool bEnableWindowResize = false;
     static bool bScaleWindow = false;
     static bool bStretchWindow = false;
+    static bool bForceClientSize = false;
+    static bool bForceWindowPosition = false;
     static HWND GameHWND = NULL;
     static int desiredClientWidth = 0;
     static int desiredClientHeight = 0;
+    static int desiredWindowX = 0;
+    static int desiredWindowY = 0;
     static bool s_cursorOnNcArea = false;
 
     static std::tuple<int, int, int, int> beforeCreateWindow(int nWidth, int nHeight)
@@ -42,6 +46,12 @@ namespace WindowedModeWrapper
             newWidth = DesktopX;
         }
 
+        if (bForceClientSize && desiredClientWidth > 0 && desiredClientHeight > 0)
+        {
+            newWidth = desiredClientWidth;
+            newHeight = desiredClientHeight;
+        }
+
         if (bBorderlessWindowed || desiredClientWidth <= 0 || desiredClientHeight <= 0)
         {
             desiredClientWidth = newWidth;
@@ -50,6 +60,11 @@ namespace WindowedModeWrapper
 
         int WindowPosX = (int)(((float)DesktopX / 2.0f) - ((float)newWidth / 2.0f));
         int WindowPosY = (int)(((float)DesktopY / 2.0f) - ((float)newHeight / 2.0f));
+        if (bForceWindowPosition)
+        {
+            WindowPosX = desiredWindowX;
+            WindowPosY = desiredWindowY;
+        }
 
         SetProcessDPIAware();
 
@@ -92,8 +107,24 @@ namespace WindowedModeWrapper
 
             int posX = ((int)devmode.dmPelsWidth - desiredClientWidth) / 2 + rect.left;
             int posY = ((int)devmode.dmPelsHeight - desiredClientHeight) / 2 + rect.top;
+            if (bForceWindowPosition)
+            {
+                posX = desiredWindowX;
+                posY = desiredWindowY;
+            }
 
             SetWindowPos(GameHWND, 0, posX, posY, outerW, outerH, SWP_NOZORDER | SWP_FRAMECHANGED);
+        }
+        else if (bForceClientSize || bForceWindowPosition)
+        {
+            UINT flags = SWP_NOZORDER | SWP_FRAMECHANGED;
+            if (!bForceClientSize)
+                flags |= SWP_NOSIZE;
+            if (!bForceWindowPosition)
+                flags |= SWP_NOMOVE;
+            SetWindowPos(GameHWND, 0,
+                desiredWindowX, desiredWindowY,
+                desiredClientWidth, desiredClientHeight, flags);
         }
         else
         {
@@ -105,8 +136,16 @@ namespace WindowedModeWrapper
     {
         if (!bBorderlessWindowed)
         {
-            desiredClientWidth = lpRect->right - lpRect->left;
-            desiredClientHeight = lpRect->bottom - lpRect->top;
+            if (bForceClientSize)
+            {
+                lpRect->right = lpRect->left + desiredClientWidth;
+                lpRect->bottom = lpRect->top + desiredClientHeight;
+            }
+            else
+            {
+                desiredClientWidth = lpRect->right - lpRect->left;
+                desiredClientHeight = lpRect->bottom - lpRect->top;
+            }
             return AdjustWindowRect(lpRect, WS_CAPTION, bMenu);
         }
         else
@@ -120,8 +159,16 @@ namespace WindowedModeWrapper
     {
         if (!bBorderlessWindowed)
         {
-            desiredClientWidth = lpRect->right - lpRect->left;
-            desiredClientHeight = lpRect->bottom - lpRect->top;
+            if (bForceClientSize)
+            {
+                lpRect->right = lpRect->left + desiredClientWidth;
+                lpRect->bottom = lpRect->top + desiredClientHeight;
+            }
+            else
+            {
+                desiredClientWidth = lpRect->right - lpRect->left;
+                desiredClientHeight = lpRect->bottom - lpRect->top;
+            }
             return AdjustWindowRectEx(lpRect, WS_CAPTION, bMenu, dwExStyle);
         }
         else
@@ -230,6 +277,11 @@ namespace WindowedModeWrapper
     static BOOL WINAPI SetWindowPos_Hook(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags)
     {
         BOOL res = SetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+        if (bForceClientSize && GameHWND == hWnd)
+        {
+            afterCreateWindow();
+            return TRUE;
+        }
         if (bBorderlessWindowed)
         {
             afterCreateWindow();
@@ -244,7 +296,11 @@ namespace WindowedModeWrapper
     static BOOL WINAPI MoveWindow_Hook(HWND hWnd, int X, int Y, int nWidth, int nHeight, BOOL bRepaint)
     {
         BOOL res = MoveWindow(hWnd, X, Y, nWidth, nHeight, bRepaint);
-        if (bBorderlessWindowed && GameHWND == hWnd)
+        if (bForceClientSize && GameHWND == hWnd)
+        {
+            afterCreateWindow();
+        }
+        else if (bBorderlessWindowed && GameHWND == hWnd)
         {
             CenterWindowPosition(nWidth, nHeight);
         }
